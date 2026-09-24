@@ -1,0 +1,14 @@
+{
+  "name":"leader-bot",
+  "version":"1.0.0",
+  "description":"LEADER server, moderation and activity Discord bot",
+  "main":"index.js",
+  "scripts":{"start":"node index.js","dev":"node --watch index.js"},
+  "engines":{"node":">=20 <25"},
+  "dependencies":{
+    "discord.js":"^14.21.0",
+    "dotenv":"^16.6.1",
+    "@supabase/supabase-js":"^2.57.4",
+    "@napi-rs/canvas":"^0.1.80"
+  }
+}
