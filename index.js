@@ -294,6 +294,8 @@ saveJson(MODLOG_CONFIG_FILE, moderationLogConfig);
 const antiSpamState = new Map();
 const MEDIA_ONLY_FILE = path.join(__dirname, "media-only.json");
 const mediaOnlyChannels = new Set(Object.keys(loadJson(MEDIA_ONLY_FILE, {})));
+const mediaBotTriggerUntil = new Map();
+const afkUsers = new Map();
 
 function loadJson(file, fallback) {
   try {
@@ -429,21 +431,50 @@ async function auditExecutor(guild, type, targetId) {
   } catch { return null; }
 }
 
-async function issueWarning(guild, targetMember, moderator, reason, automatic = false) {
+async function issueWarning(guild, targetMember, moderator, reason, automatic = false, notifyChannel = null) {
   const entry = addWarning(guild.id, targetMember.id, {
     reason, moderatorId: moderator?.id || null, automatic
   });
   const count = getWarnings(guild.id, targetMember.id).length;
+  const warningEmbed = new EmbedBuilder()
+    .setTitle(`⚠️ WARNING ${count}/3`)
+    .setColor(0xF39C12)
+    .setDescription(`${targetMember} has received a warning.`)
+    .addFields(
+      { name: "Reason", value: String(reason).slice(0, 1024), inline: false },
+      { name: "Issued By", value: moderator ? `${moderator}` : "🤖 Leader • Automatic Anti-Spam", inline: true },
+      { name: "Warning Count", value: `**${count}/3** today`, inline: true },
+      { name: "Case ID", value: `\`${entry.caseId}\``, inline: true }
+    )
+    .setFooter({ text: count >= 3 ? "3 warnings reached • 1-hour timeout will be applied" : "Further warnings may lead to strict action" })
+    .setTimestamp();
+
   await sendModerationLog(guild, "warning", {
     user: `${targetMember}`, moderator: moderator ? `${moderator}` : "Leader (automatic)", reason, caseId: entry.caseId,
     details: `${automatic ? "Automatic anti-spam warning" : "Manual moderator warning"}\nDaily warnings: **${count}/3**`
   });
+
+  if (notifyChannel?.isTextBased()) {
+    await notifyChannel.send({ embeds: [warningEmbed] }).catch(() => {});
+  } else {
+    await targetMember.send({ embeds: [warningEmbed] }).catch(() => {});
+  }
+
   if (count >= 3) {
     await targetMember.timeout(60 * 60 * 1000, "3 warnings in one day").catch(() => {});
     await sendModerationLog(guild, "timeout", {
       user: `${targetMember}`, moderator: "Leader (automatic)", reason: "3 warnings in one day", caseId: entry.caseId,
       details: "Automatic 1-hour timeout triggered by the daily warning threshold."
     });
+    if (notifyChannel?.isTextBased()) {
+      const timeoutEmbed = new EmbedBuilder()
+        .setTitle("🔇 3 WARNINGS REACHED")
+        .setColor(0xC0392B)
+        .setDescription(`${targetMember} has reached **3 warnings today** and has been timed out for **1 hour**.`)
+        .addFields({ name: "Action", value: "⏱️ 1-hour timeout", inline: true }, { name: "Case ID", value: `\`${entry.caseId}\``, inline: true })
+        .setTimestamp();
+      await notifyChannel.send({ embeds: [timeoutEmbed] }).catch(() => {});
+    }
   }
   return entry;
 }
@@ -463,7 +494,7 @@ async function processAntiSpam(message) {
   if (state.count === 3 && !state.warned) {
     state.warned = true;
     const member = message.member;
-    if (member) await issueWarning(message.guild, member, null, `Repeated the same message 3 times within 1 minute: ${message.content}`, true);
+    if (member) await issueWarning(message.guild, member, null, `Repeated the same message 3 times within 1 minute: ${message.content}`, true, message.channel);
   }
 }
 
@@ -633,42 +664,42 @@ async function sendDailyModAlert(guild, force = false) {
     const activity = modActivity(guild.id, member.id);
 
     if (st.vcRoleId && member.roles.cache.has(st.vcRoleId) && Number(activity.vcSeconds) < vcRequired) {
-      vcMissing.push(`${member}`);
+      const done = Math.min(Number(activity.vcSeconds) || 0, vcRequired);
+      vcMissing.push({ mention: `${member}`, id: member.id, done, remaining: Math.max(0, vcRequired - done) });
     }
     if (st.chatRoleId && member.roles.cache.has(st.chatRoleId) && Number(activity.messages) < chatRequired) {
-      chatMissing.push(`${member}`);
+      const done = Math.min(Number(activity.messages) || 0, chatRequired);
+      chatMissing.push({ mention: `${member}`, id: member.id, done, remaining: Math.max(0, chatRequired - done) });
     }
   }
 
   const vcSection = vcMissing.length
-    ? vcMissing.join(" ")
+    ? vcMissing.map(x => `${x.mention} — **${formatDurationShort(x.done)} / ${formatDurationShort(vcRequired)}**\n↳ Missing: **${formatDurationShort(x.remaining)}**`).join("\n\n")
     : "All VC moderators met the daily VC requirement.";
   const chatSection = chatMissing.length
-    ? chatMissing.join(" ")
+    ? chatMissing.map(x => `${x.mention} — **${x.done} / ${chatRequired} messages**\n↳ Missing: **${x.remaining} messages**`).join("\n\n")
     : "All Chat moderators met the daily message requirement.";
 
+  const strictNotice = (vcMissing.length || chatMissing.length)
+    ? "⚠️ **REQUIREMENT NOTICE**\nCOMPLETE YOUR REQUIREMENTS OTHERWISE STRICT ACTION CAN BE TAKEN."
+    : "✅ **ALL DAILY REQUIREMENTS COMPLETED**";
+
   const embed = new EmbedBuilder()
-    .setTitle("🛡️ Daily Moderator Activity Alert")
-    .setColor((vcMissing.length || chatMissing.length) ? 0xE67E22 : 0x2ECC71)
+    .setTitle("🚨 DAILY MODERATOR REQUIREMENT ALERT")
+    .setColor((vcMissing.length || chatMissing.length) ? 0xC0392B : 0x2ECC71)
+    .setDescription(strictNotice)
     .addFields(
-      {
-        name: "🎙️ VC MODERATORS",
-        value: `${vcSection}\n\nRequired: **${formatDurationShort(vcRequired)} VC time**`,
-        inline: false
-      },
-      {
-        name: "💬 CHAT MODERATORS",
-        value: `${chatSection}\n\nRequired: **${chatRequired} messages**`,
-        inline: false
-      }
+      { name: "🎙️ VC MODERATORS", value: `${vcSection}\n\nRequired: **${formatDurationShort(vcRequired)} VC time**`, inline: false },
+      { name: "💬 CHAT MODERATORS", value: `${chatSection}\n\nRequired: **${chatRequired} messages**`, inline: false },
+      { name: "⚠️ ENFORCEMENT NOTICE", value: "Failure to complete the configured daily requirements may result in strict staff action according to server rules.", inline: false }
     )
     .setFooter({ text: `Leader • Daily requirements • ${MOD_ALERT_TIME_ZONE}` })
     .setTimestamp();
 
   await channel.send({
-    content: [...vcMissing, ...chatMissing].join(" ") || undefined,
+    content: [...vcMissing, ...chatMissing].map(x => `<@${x.id}>`).join(" ") || undefined,
     embeds: [embed],
-    allowedMentions: { users: [...new Set([...vcMissing, ...chatMissing].map(x => x.match(/<@(\d+)>/)?.[1]).filter(Boolean))] }
+    allowedMentions: { users: [...new Set([...vcMissing, ...chatMissing].map(x => x.id))] }
   }).catch(err => console.error("Daily moderator alert error:", err));
 
   if (!force) {
@@ -1342,10 +1373,18 @@ client.on(
   "messageCreate",
   async message => {
 
-    if (
-      !message.guild ||
-      message.author.bot
-    ) {
+    if (!message.guild) return;
+
+    // In media-only channels, remove responses from other bots shortly after a
+    // user runs a command. This prevents bots such as OwO from posting command
+    // responses in a media-only channel.
+    if (message.author.bot) {
+      if (mediaOnlyChannels.has(message.channel.id) && message.author.id !== client.user?.id) {
+        const until = mediaBotTriggerUntil.get(message.channel.id) || 0;
+        if (Date.now() <= until) {
+          await message.delete().catch(() => {});
+        }
+      }
       return;
     }
 
@@ -1394,6 +1433,27 @@ client.on(
     recordMessageActivity(message.guild.id, message.author.id);
     recordModChatActivity(message);
 
+    // AFK system: any normal message removes the sender's AFK status.
+    if (afkUsers.has(message.author.id) && !lowerContent.startsWith("?afk")) {
+      const afk = afkUsers.get(message.author.id);
+      afkUsers.delete(message.author.id);
+      await message.channel.send({
+        embeds: [new EmbedBuilder().setTitle("👋 AFK Removed").setColor(0x2ECC71).setDescription(`${message.author} is no longer AFK.`).setTimestamp()]
+      }).catch(() => {});
+    }
+
+    // Tell users when they mention someone who is AFK.
+    const mentionedAfk = message.mentions.users.filter(u => afkUsers.has(u.id));
+    if (mentionedAfk.size) {
+      const lines = [...mentionedAfk.values()].map(u => {
+        const afk = afkUsers.get(u.id);
+        return `• ${u} — **AFK**${afk?.reason ? `: ${afk.reason}` : ""}`;
+      });
+      await message.channel.send({
+        embeds: [new EmbedBuilder().setTitle("💤 AFK Notice").setColor(0x5865F2).setDescription(lines.join("\n")).setTimestamp()]
+      }).catch(() => {});
+    }
+
     // Consecutive identical-message anti-spam: A -> A -> A warns;
     // A -> B -> A does not. Case and repeated whitespace are normalized.
     await processAntiSpam(message);
@@ -1406,6 +1466,9 @@ client.on(
         return type.startsWith("image/") || type.startsWith("video/");
       });
       if (!hasMedia) {
+        // Any text command (including commands for other bots such as "OwO daily")
+        // starts a short cleanup window for the other bot's response.
+        mediaBotTriggerUntil.set(message.channel.id, Date.now() + 30000);
         if (message.content.trim().startsWith("?")) {
           const notice = await message.channel.send({
             content: `${message.author} ❌ This is a **media-only channel**. Commands/text messages are not allowed here.`,
@@ -1418,6 +1481,13 @@ client.on(
         }
         return;
       }
+    }
+
+    if (lowerContent === "?afk" || lowerContent.startsWith("?afk ")) {
+      const reason = message.content.trim().split(/\s+/).slice(1).join(" ") || "AFK";
+      afkUsers.set(message.author.id, { reason, since: Date.now(), guildId: message.guild.id });
+      const embed = new EmbedBuilder().setTitle("💤 AFK Enabled").setColor(0x5865F2).setDescription(`${message.author} is now AFK.\n**Reason:** ${reason}`).setTimestamp();
+      return message.channel.send({ embeds: [embed] });
     }
 
     const activityCommandResult = await handleActivityCommand(message);
@@ -2056,8 +2126,8 @@ client.on(
       const target = message.mentions.members.first();
       if (!target) return message.reply("❌ Use `?warn @user [reason]`.");
       const reason = message.content.split(/\s+/).slice(2).join(" ") || "No reason provided";
-      const entry = await issueWarning(message.guild, target, message.member, reason, false);
-      return message.channel.send({ embeds: [new EmbedBuilder().setTitle("⚠️ Warning Issued").setColor(0xF39C12).setDescription(`${target} has received a warning.`).addFields({ name: "Reason", value: reason }, { name: "Case ID", value: `\`${entry.caseId}\``, inline: true }, { name: "Daily Warnings", value: `${getWarnings(message.guild.id, target.id).length}/3`, inline: true }).setTimestamp()] });
+      await issueWarning(message.guild, target, message.member, reason, false, message.channel);
+      return;
     }
 
     if (lowerContent.startsWith("?unwarn")) {
