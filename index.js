@@ -22,6 +22,8 @@ const {
 
 const config = require("./config");
 
+const specialWelcome = require("./special-welcome");
+
 const {
   getUser,
   addMessage,
@@ -1347,6 +1349,12 @@ client.on(
       return;
     }
 
+    // Special welcome commands (?setspecialwelcomechannel / ?w).
+    // Handle these before the rest of Leader's commands so the welcome
+    // feature is actually connected to the main message handler.
+    const specialWelcomeHandled = await specialWelcome.handleMessage(message);
+    if (specialWelcomeHandled) return;
+
     const content = message.content.trim();
     const lowerContent = content.toLowerCase();
     const manageGuild = message.member?.permissions.has(PermissionFlagsBits.ManageGuild) ?? false;
@@ -2548,24 +2556,32 @@ client.on("guildMemberAdd", async member => {
 
   // Automatically assign the configured pre-roles to new members.
   const roleIds = getAutoRoleIds(member.guild.id);
-  if (!roleIds.length) return;
 
-  const roles = roleIds.map(id => member.guild.roles.cache.get(id)).filter(Boolean);
-  const botMember = member.guild.members.me || await member.guild.members.fetchMe().catch(() => null);
-  const assignable = roles.filter(role => !role.managed && botMember && role.position < botMember.roles.highest.position);
-  if (!assignable.length) return;
+  if (roleIds.length) {
+    const roles = roleIds.map(id => member.guild.roles.cache.get(id)).filter(Boolean);
+    const botMember = member.guild.members.me || await member.guild.members.fetchMe().catch(() => null);
+    const assignable = roles.filter(role => !role.managed && botMember && role.position < botMember.roles.highest.position);
 
-  const key = `${member.guild.id}:${member.id}`;
-  pendingAutoRoleAssignments.set(key, true);
-  try {
-    await member.roles.add(assignable, "Automatic new-member roles");
-    // The gateway guildMemberUpdate normally produces the grouped role log.
-    // If it has not arrived yet, leave the pending marker briefly; it is consumed by that event.
-    setTimeout(() => pendingAutoRoleAssignments.delete(key), 10000);
-  } catch (err) {
-    pendingAutoRoleAssignments.delete(key);
-    console.error(`Automatic role assignment failed for ${member.user.tag}:`, err);
+    if (assignable.length) {
+      const key = `${member.guild.id}:${member.id}`;
+      pendingAutoRoleAssignments.set(key, true);
+      try {
+        await member.roles.add(assignable, "Automatic new-member roles");
+        // The gateway guildMemberUpdate normally produces the grouped role log.
+        // If it has not arrived yet, leave the pending marker briefly; it is consumed by that event.
+        setTimeout(() => pendingAutoRoleAssignments.delete(key), 10000);
+      } catch (err) {
+        pendingAutoRoleAssignments.delete(key);
+        console.error(`Automatic role assignment failed for ${member.user.tag}:`, err);
+      }
+    }
   }
+
+  // Announce the join in the configured special-welcome channel. This runs
+  // after automatic roles so role-based gender detection can work.
+  await specialWelcome.notifyNewMember(member).catch(err =>
+    console.error("Special welcome notification failed:", err)
+  );
 });
 
 client.on("guildMemberRemove", async member => {
