@@ -3,6 +3,7 @@ const giveawayCommand = require("./src/commands/giveaway");
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const {
   Client,
@@ -72,6 +73,78 @@ if (!config.clientId) {
 }
 
 /* =========================
+   DASHBOARD CONFIG + API
+========================= */
+
+const DASHBOARD_SPAM_FILE = path.join(__dirname, "dashboard-antispam.json");
+const DASHBOARD_API_KEY = String(process.env.DASHBOARD_API_KEY || "");
+const DEFAULT_ANTI_SPAM_SETTINGS = Object.freeze({
+  enabled: true,
+  threshold: 3,
+  windowSeconds: 60,
+  action: "Warn",
+  deleteMessages: false,
+  ignoreStaff: true,
+  timeoutSeconds: 600,
+  warningMessage: "Please avoid sending the same message repeatedly. Further spam may lead to moderation action.",
+  exemptRoles: ["Moderator", "Administrator"]
+});
+let antiSpamSettings = loadJson(DASHBOARD_SPAM_FILE, { ...DEFAULT_ANTI_SPAM_SETTINGS });
+
+function sanitizeAntiSpamSettings(input = {}) {
+  const allowedActions = new Set(["Warn", "Delete + warn", "Timeout", "Delete + timeout"]);
+  const threshold = Number(input.threshold);
+  const windowSeconds = Number(input.windowSeconds);
+  const timeoutSeconds = Number(input.timeoutSeconds);
+  return {
+    enabled: input.enabled !== false,
+    threshold: Number.isFinite(threshold) ? Math.max(2, Math.min(20, Math.floor(threshold))) : DEFAULT_ANTI_SPAM_SETTINGS.threshold,
+    windowSeconds: Number.isFinite(windowSeconds) ? Math.max(5, Math.min(600, Math.floor(windowSeconds))) : DEFAULT_ANTI_SPAM_SETTINGS.windowSeconds,
+    action: allowedActions.has(input.action) ? input.action : DEFAULT_ANTI_SPAM_SETTINGS.action,
+    deleteMessages: input.deleteMessages === true,
+    ignoreStaff: input.ignoreStaff !== false,
+    timeoutSeconds: [600, 3600, 86400].includes(timeoutSeconds) ? timeoutSeconds : DEFAULT_ANTI_SPAM_SETTINGS.timeoutSeconds,
+    warningMessage: typeof input.warningMessage === "string" ? input.warningMessage.slice(0, 1500) : DEFAULT_ANTI_SPAM_SETTINGS.warningMessage,
+    exemptRoles: Array.isArray(input.exemptRoles) ? input.exemptRoles.filter(x => typeof x === "string").map(x => x.trim().slice(0, 100)).filter(Boolean).slice(0, 30) : DEFAULT_ANTI_SPAM_SETTINGS.exemptRoles
+  };
+}
+antiSpamSettings = sanitizeAntiSpamSettings(antiSpamSettings);
+saveJson(DASHBOARD_SPAM_FILE, antiSpamSettings);
+
+function isValidDashboardKey(supplied) {
+  if (!DASHBOARD_API_KEY || !supplied) return false;
+  const a = Buffer.from(String(supplied));
+  const b = Buffer.from(DASHBOARD_API_KEY);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function setApiHeaders(res) {
+  // Local-file dashboard prototype requires CORS. Keep API key private and use HTTPS in production.
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, PUT, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Cache-Control", "no-store");
+}
+
+function readJsonBody(req, maxBytes = 12000) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.on("data", chunk => {
+      body += chunk;
+      if (Buffer.byteLength(body) > maxBytes) {
+        reject(Object.assign(new Error("Request body too large"), { statusCode: 413 }));
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      try { resolve(JSON.parse(body || "{}")); }
+      catch { reject(Object.assign(new Error("Invalid JSON body"), { statusCode: 400 })); }
+    });
+    req.on("error", reject);
+  });
+}
+
+/* =========================
    HEALTH SERVER
 ========================= */
 
@@ -82,8 +155,44 @@ function startHealthServer() {
 
   if (!port) return;
 
-  healthServer = http.createServer((req, res) => {
-    if (req.url === "/health" || req.url === "/") {
+  healthServer = http.createServer(async (req, res) => {
+    const pathname = String(req.url || "").split("?")[0];
+    if (pathname.startsWith("/api/anti-spam")) {
+      setApiHeaders(res);
+      if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+      const auth = String(req.headers.authorization || "");
+      const suppliedKey = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+      if (!isValidDashboardKey(suppliedKey)) {
+        res.writeHead(DASHBOARD_API_KEY ? 401 : 503, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: DASHBOARD_API_KEY ? "Unauthorized" : "Dashboard API is not configured. Set DASHBOARD_API_KEY in the service environment." }));
+        return;
+      }
+      if (pathname !== "/api/anti-spam") { res.writeHead(404); res.end(JSON.stringify({ ok: false, error: "Not found" })); return; }
+      if (req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, settings: antiSpamSettings }));
+        return;
+      }
+      if (req.method === "PUT") {
+        try {
+          const body = await readJsonBody(req);
+          antiSpamSettings = sanitizeAntiSpamSettings(body.settings || body);
+          saveJson(DASHBOARD_SPAM_FILE, antiSpamSettings);
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, settings: antiSpamSettings }));
+          console.log(`Dashboard updated anti-spam settings: enabled=${antiSpamSettings.enabled}, threshold=${antiSpamSettings.threshold}, window=${antiSpamSettings.windowSeconds}s, action=${antiSpamSettings.action}`);
+        } catch (err) {
+          res.writeHead(err.statusCode || 400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: err.statusCode === 413 ? "Request body too large" : "Invalid JSON settings" }));
+        }
+        return;
+      }
+      res.writeHead(405, { "Content-Type": "application/json; charset=utf-8", Allow: "GET, PUT, OPTIONS" });
+      res.end(JSON.stringify({ ok: false, error: "Method not allowed" }));
+      return;
+    }
+
+    if (pathname === "/health" || pathname === "/") {
       const ready = client?.isReady?.() === true;
       res.writeHead(ready ? 200 : 503, {
         "Content-Type": "application/json; charset=utf-8",
@@ -105,6 +214,7 @@ function startHealthServer() {
 
   healthServer.listen(port, "0.0.0.0", () => {
     console.log(`Health server listening on port ${port}`);
+    if (!DASHBOARD_API_KEY) console.warn("Dashboard API disabled: DASHBOARD_API_KEY is not set.");
   });
 }
 
@@ -480,21 +590,41 @@ async function issueWarning(guild, targetMember, moderator, reason, automatic = 
 }
 
 async function processAntiSpam(message) {
-  if (!message.content.trim()) return;
+  if (!antiSpamSettings.enabled || !message.content.trim() || !message.guild) return;
+  const member = message.member;
+  if (!member) return;
+  if (antiSpamSettings.ignoreStaff && member.permissions.has(PermissionFlagsBits.Administrator | PermissionFlagsBits.ManageGuild | PermissionFlagsBits.ModerateMembers)) return;
+  if (antiSpamSettings.exemptRoles?.length) {
+    const exemptNames = new Set(antiSpamSettings.exemptRoles.map(name => name.toLowerCase()));
+    if (member.roles.cache.some(role => exemptNames.has(role.name.toLowerCase()))) return;
+  }
+
   const key = `${message.guild.id}:${message.author.id}`;
   const normalized = normalizeSpamText(message.content);
   const now = Date.now();
   const state = antiSpamState.get(key);
-  if (!state || state.text !== normalized || now - state.lastAt > 60 * 1000) {
-    antiSpamState.set(key, { text: normalized, count: 1, lastAt: now, warned: false });
+  if (!state || state.text !== normalized || now - state.firstAt > antiSpamSettings.windowSeconds * 1000) {
+    antiSpamState.set(key, { text: normalized, count: 1, firstAt: now, lastAt: now, warned: false });
     return;
   }
   state.count += 1;
   state.lastAt = now;
-  if (state.count === 3 && !state.warned) {
-    state.warned = true;
-    const member = message.member;
-    if (member) await issueWarning(message.guild, member, null, `Repeated the same message 3 times within 1 minute: ${message.content}`, true, message.channel);
+  if (state.count < antiSpamSettings.threshold || state.warned) return;
+  state.warned = true;
+
+  const shouldDelete = antiSpamSettings.deleteMessages || antiSpamSettings.action.startsWith("Delete +");
+  const shouldTimeout = antiSpamSettings.action === "Timeout" || antiSpamSettings.action === "Delete + timeout";
+  if (shouldDelete) await message.delete().catch(err => console.warn("Anti-spam could not delete message:", err.message));
+
+  if (antiSpamSettings.action === "Warn" || antiSpamSettings.action === "Delete + warn" || shouldTimeout) {
+    const reason = antiSpamSettings.warningMessage || `Repeated the same message ${antiSpamSettings.threshold} times within ${antiSpamSettings.windowSeconds} seconds.`;
+    if (shouldTimeout) {
+      await member.timeout(antiSpamSettings.timeoutSeconds, "Repeated-message anti-spam rule").catch(err => console.warn("Anti-spam timeout failed:", err.message));
+      await message.channel.send({ content: `${member}, ${reason}`, allowedMentions: { users: [member.id] } }).catch(() => {});
+      await sendModerationLog(message.guild, "timeout", { user: `${member}`, moderator: "Leader (automatic)", reason: `Repeated-message anti-spam: ${antiSpamSettings.threshold} messages/${antiSpamSettings.windowSeconds}s`, details: `Configured dashboard action: ${antiSpamSettings.action}` });
+    } else {
+      await issueWarning(message.guild, member, null, `Repeated-message anti-spam: ${antiSpamSettings.threshold} messages within ${antiSpamSettings.windowSeconds}s. ${reason}`, true, message.channel);
+    }
   }
 }
 
