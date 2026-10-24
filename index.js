@@ -209,12 +209,17 @@ function startHealthServer() {
 
   healthServer = http.createServer(async (req, res) => {
     const pathname = String(req.url || "").split("?")[0];
+    // Log dashboard API requests without logging secrets or request bodies.
+    if (pathname.startsWith("/api/")) {
+      console.log(`[DASHBOARD API] ${req.method} ${pathname} origin=${String(req.headers.origin || "none").slice(0, 120)}`);
+    }
     if (pathname.startsWith("/api/anti-spam")) {
       setApiHeaders(res);
       if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
       const auth = String(req.headers.authorization || "");
       const suppliedKey = auth.startsWith("Bearer ") ? auth.slice(7) : "";
       if (!isValidDashboardKey(suppliedKey)) {
+        console.warn(`[DASHBOARD API] anti-spam authentication failed; configured=${Boolean(DASHBOARD_API_KEY)} supplied=${Boolean(suppliedKey)}`);
         res.writeHead(DASHBOARD_API_KEY ? 401 : 503, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: false, error: DASHBOARD_API_KEY ? "Unauthorized" : "Dashboard API is not configured. Set DASHBOARD_API_KEY in the service environment." }));
         return;
@@ -431,6 +436,7 @@ function startHealthServer() {
         service: "Leader",
         uptime: Math.round(process.uptime()),
         apiReady: true,
+        dashboardApiConfigured: Boolean(DASHBOARD_API_KEY),
         discordReady: ready
       }) + "\n");
       return;
