@@ -257,6 +257,45 @@ function startHealthServer() {
     if (pathname.startsWith("/api/")) {
       console.log(`[DASHBOARD API] ${req.method} ${pathname} origin=${String(req.headers.origin || "none").slice(0, 120)}`);
     }
+    if (pathname.startsWith("/api/dashboard-stats")) {
+      setApiHeaders(res);
+      if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+      const auth = String(req.headers.authorization || "");
+      const suppliedKey = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+      if (!isValidDashboardKey(suppliedKey)) {
+        res.writeHead(DASHBOARD_API_KEY ? 401 : 503, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: DASHBOARD_API_KEY ? "Unauthorized" : "Dashboard API is not configured. Set DASHBOARD_API_KEY in the service environment." }));
+        return;
+      }
+      if (pathname !== "/api/dashboard-stats" || req.method !== "GET") {
+        res.writeHead(pathname === "/api/dashboard-stats" ? 405 : 404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: pathname === "/api/dashboard-stats" ? "Method not allowed" : "Not found" }));
+        return;
+      }
+      const botActive = client?.isReady?.() === true;
+      const guilds = [...(client?.guilds?.cache?.values?.() || [])];
+      const totalMembers = guilds.reduce((sum, guild) => sum + (Number(guild.memberCount) || 0), 0);
+      // Presence data comes from Discord Gateway and requires the Presence Intent
+      // to be enabled in the Discord Developer Portal as well as in client intents.
+      const onlineMembers = guilds.reduce((sum, guild) => sum + guild.members.cache.filter(member => {
+        const status = member.presence?.status;
+        return Boolean(status && status !== "offline");
+      }).size, 0);
+      const vcMembers = guilds.reduce((sum, guild) => sum + guild.voiceStates.cache.filter(state => Boolean(state.channelId)).size, 0);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({
+        ok: true,
+        botActive,
+        totalMembers,
+        onlineMembers,
+        vcMembers,
+        guildCount: guilds.length,
+        updatedAt: new Date().toISOString(),
+        presenceIntentRequired: true
+      }));
+      return;
+    }
+
     if (pathname.startsWith("/api/anti-spam")) {
       setApiHeaders(res);
       if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
