@@ -250,7 +250,7 @@ function startHealthServer() {
     }
 
     // Shared dashboard configuration is stored by the bot process, not only in browser localStorage.
-    if (["/api/dashboard-config", "/api/command-manager", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup", "/api/discord-roles", "/api/discord-role"].includes(pathname)) {
+    if (["/api/dashboard-config", "/api/command-manager", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup", "/api/discord-roles", "/api/discord-role", "/api/auto-roles"].includes(pathname)) {
       setApiHeaders(res);
       if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
       const auth = String(req.headers.authorization || "");
@@ -324,6 +324,48 @@ function startHealthServer() {
         const roles = await guild.roles.fetch().catch(() => null);
         if (!roles) return sendJson(500, { ok: false, error: "Could not fetch roles for this server." });
         return sendJson(200, { ok: true, guild: { id: guild.id, name: guild.name }, permissionOptions: Object.keys(PermissionFlagsBits).filter(k => !/^\d+$/.test(k)), roles: [...roles.values()].sort((a,b) => b.position-a.position).map(role => ({ id: role.id, name: role.name, color: role.hexColor, position: role.position, managed: role.managed, permissions: role.permissions.toArray(), editable: !role.managed && role.id !== guild.id })) });
+      }
+      if (pathname === "/api/auto-roles") {
+        const parsedUrl = new URL(req.url, "http://localhost");
+        if (req.method === "GET") {
+          const guildId = String(parsedUrl.searchParams.get("guildId") || "").trim();
+          if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Select a valid Discord server first." });
+          if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+          const guild = await client.guilds.fetch(guildId).catch(() => null);
+          if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
+          const roles = await guild.roles.fetch().catch(() => null);
+          if (!roles) return sendJson(500, { ok: false, error: "Could not fetch server roles." });
+          const configured = new Set(getAutoRoleIds(guild.id));
+          const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
+          return sendJson(200, { ok: true, guild: { id: guild.id, name: guild.name }, roleIds: [...configured], roles: [...roles.values()].sort((a,b) => b.position-a.position).map(role => ({ id: role.id, name: role.name, color: role.hexColor, position: role.position, managed: role.managed, everyone: role.id === guild.id, assignable: !role.managed && role.id !== guild.id && !!botMember && role.position < botMember.roles.highest.position })) });
+        }
+        if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
+        try {
+          const body = await readJsonBody(req, 12000);
+          const guildId = String(body.guildId || "").trim();
+          if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Select a valid Discord server." });
+          if (!Array.isArray(body.roleIds)) return sendJson(400, { ok: false, error: "Choose the roles to give to new members." });
+          if (body.roleIds.length > 50) return sendJson(400, { ok: false, error: "You can select up to 50 automatic roles." });
+          if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+          const guild = await client.guilds.fetch(guildId).catch(() => null);
+          if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
+          const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
+          if (!botMember?.permissions.has(PermissionFlagsBits.ManageRoles)) return sendJson(403, { ok: false, error: "LEADER needs Manage Roles permission to configure automatic roles." });
+          const roleIds = [...new Set(body.roleIds.filter(id => typeof id === "string" && /^\d{17,20}$/.test(id)))];
+          const roles = await guild.roles.fetch();
+          for (const roleId of roleIds) {
+            const role = roles.get(roleId);
+            if (!role) return sendJson(400, { ok: false, error: "One of the selected roles no longer exists. Refresh the role list and try again." });
+            if (role.managed || role.id === guild.id || role.position >= botMember.roles.highest.position) return sendJson(400, { ok: false, error: `The role “${role.name}” cannot be assigned by LEADER. Move it below the bot's highest role or choose another role.` });
+          }
+          autoRoleConfig[guild.id] = roleIds;
+          saveAutoRoles();
+          console.log(`[AUTO ROLES] Dashboard saved ${roleIds.length} role(s) for guild ${guild.id}`);
+          return sendJson(200, { ok: true, guildId: guild.id, roleIds, message: `Automatic roles saved. New members will receive ${roleIds.length} role(s).` });
+        } catch (err) {
+          console.error("Dashboard auto-role update failed:", err);
+          return sendJson(err.statusCode || 400, { ok: false, error: err.statusCode === 413 ? "Request body too large" : "Could not save automatic roles." });
+        }
       }
       if (pathname === "/api/discord-role") {
         if (!["PUT", "POST", "DELETE"].includes(req.method)) return sendJson(405, { ok: false, error: "Method not allowed" });
