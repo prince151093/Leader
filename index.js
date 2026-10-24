@@ -272,24 +272,41 @@ function startHealthServer() {
         res.end(JSON.stringify({ ok: false, error: pathname === "/api/dashboard-stats" ? "Method not allowed" : "Not found" }));
         return;
       }
+      const requestedGuildId = String(new URL(req.url, "http://localhost").searchParams.get("guildId") || "").trim();
+      if (!/^\d{17,20}$/.test(requestedGuildId)) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "Enter a valid Discord server ID (17–20 digits)." }));
+        return;
+      }
       const botActive = client?.isReady?.() === true;
-      const guilds = [...(client?.guilds?.cache?.values?.() || [])];
-      const totalMembers = guilds.reduce((sum, guild) => sum + (Number(guild.memberCount) || 0), 0);
-      // Presence data comes from Discord Gateway and requires the Presence Intent
-      // to be enabled in the Discord Developer Portal as well as in client intents.
-      const onlineMembers = guilds.reduce((sum, guild) => sum + guild.members.cache.filter(member => {
+      if (!botActive) {
+        res.writeHead(503, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ ok: false, error: "The bot is not connected to Discord yet." }));
+        return;
+      }
+      const guild = await client.guilds.fetch(requestedGuildId).catch(() => null);
+      if (!guild) {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ ok: false, error: "LEADER is not in that server, or the server ID is invalid." }));
+        return;
+      }
+      // All counts are scoped to the single requested server. Presence counts
+      // depend on the privileged Presence Intent and available gateway cache.
+      const totalMembers = Number(guild.memberCount) || guild.members.cache.size;
+      const onlineMembers = guild.members.cache.filter(member => {
         const status = member.presence?.status;
         return Boolean(status && status !== "offline");
-      }).size, 0);
-      const vcMembers = guilds.reduce((sum, guild) => sum + guild.voiceStates.cache.filter(state => Boolean(state.channelId)).size, 0);
+      }).size;
+      const vcMembers = guild.voiceStates.cache.filter(state => Boolean(state.channelId)).size;
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
       res.end(JSON.stringify({
         ok: true,
         botActive,
+        guildId: guild.id,
+        guildName: guild.name,
         totalMembers,
         onlineMembers,
         vcMembers,
-        guildCount: guilds.length,
         updatedAt: new Date().toISOString(),
         presenceIntentRequired: true
       }));
