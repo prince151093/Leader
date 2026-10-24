@@ -417,16 +417,20 @@ function startHealthServer() {
     }
 
     if (pathname === "/health" || pathname === "/") {
+      // Health checks must be reachable from a dashboard opened as a local HTML file.
+      // Keep API availability separate from Discord Gateway readiness: Render can
+      // reach the HTTP backend even while the Discord client is still connecting.
+      setApiHeaders(res);
       const ready = client?.isReady?.() === true;
-      res.writeHead(ready ? 200 : 503, {
+      res.writeHead(200, {
         "Content-Type": "application/json; charset=utf-8",
         "Cache-Control": "no-store"
       });
-
       res.end(JSON.stringify({
-        ok: ready,
+        ok: true,
         service: "Leader",
         uptime: Math.round(process.uptime()),
+        apiReady: true,
         discordReady: ready
       }) + "\n");
       return;
