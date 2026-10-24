@@ -79,50 +79,94 @@ if (!config.clientId) {
 const DASHBOARD_SPAM_FILE = path.join(__dirname, "dashboard-antispam.json");
 const DASHBOARD_CONFIG_FILE = path.join(__dirname, "dashboard-config.json");
 const DASHBOARD_COMMAND_FILE = path.join(__dirname, "dashboard-command-manager.json");
+const DASHBOARD_COMMAND_AUDIT_FILE = path.join(__dirname, "dashboard-command-audit.json");
+const DASHBOARD_COMMAND_ANALYTICS_FILE = path.join(__dirname, "dashboard-command-analytics.json");
 let dashboardConfig = loadJson(DASHBOARD_CONFIG_FILE, {});
 let dashboardCommandSettings = loadJson(DASHBOARD_COMMAND_FILE, {});
-// Migrate the earlier { giveaway: true/false } format to per-command policies.
-if (typeof dashboardCommandSettings.giveaway === "boolean") {
-  dashboardCommandSettings = { giveaway: { enabled: dashboardCommandSettings.giveaway } };
-}
+let dashboardCommandAudit = loadJson(DASHBOARD_COMMAND_AUDIT_FILE, []);
+let dashboardCommandAnalytics = loadJson(DASHBOARD_COMMAND_ANALYTICS_FILE, {});
+if (!Array.isArray(dashboardCommandAudit)) dashboardCommandAudit = [];
+if (!dashboardCommandAnalytics || typeof dashboardCommandAnalytics !== "object" || Array.isArray(dashboardCommandAnalytics)) dashboardCommandAnalytics = {};
+// Migrate the older boolean format while retaining existing root-level policies as global defaults.
+if (typeof dashboardCommandSettings.giveaway === "boolean") dashboardCommandSettings.giveaway = { enabled: dashboardCommandSettings.giveaway };
 const PREFIX_COMMAND_NAMES = [
   "activity", "addinsta", "afk", "autoroles", "ban", "channellog", "clear", "clearautoroles", "commands", "giverole", "insta", "kick", "listas", "lock", "memberlog", "messagelog", "modalertstatus", "modalerttest", "modpdf", "modlogs", "mute", "progress", "purge", "removeas", "removeautorole", "removeinsta", "removemedia", "removerole", "resetalert", "rolelog", "setalerttime", "setas", "setasprogressviewchannel", "setautorole", "setchannellog", "setchatmod", "setdailyreportrole", "setmainchannel", "setmedia", "setmemberlog", "setmessagelog", "setminreqchat", "setminreqvc", "setmodalert", "setmodlogs", "setnick", "setrolelog", "setvcmod", "setvoicelog", "slowmode", "timeout", "unban", "unlock", "unmute", "untimeout", "unwarn", "voicelog", "warn", "warns", "w", "setspecialwelcomechannel"
 ];
 const COMMAND_DEFAULT_DENIAL = "{user}, you don't have permission to use `{command}`.";
-function getCommandPolicy(name) {
-  const raw = dashboardCommandSettings[name];
+const commandCooldowns = new Map();
+const commandUsageWindows = new Map();
+function getCommandPolicy(name, guildId = "") {
+  const guildPolicies = guildId && dashboardCommandSettings[guildId] && typeof dashboardCommandSettings[guildId] === "object" ? dashboardCommandSettings[guildId] : {};
+  const raw = guildPolicies[name] && typeof guildPolicies[name] === "object" ? guildPolicies[name] : dashboardCommandSettings[name];
   const policy = raw && typeof raw === "object" ? raw : {};
   return {
     enabled: policy.enabled !== false,
     adminOnly: policy.adminOnly === true,
     allowedRoleIds: Array.isArray(policy.allowedRoleIds) ? policy.allowedRoleIds.filter(x => typeof x === "string").slice(0, 50) : [],
     allowedUserIds: Array.isArray(policy.allowedUserIds) ? policy.allowedUserIds.filter(x => typeof x === "string").slice(0, 50) : [],
+    allowedChannelIds: Array.isArray(policy.allowedChannelIds) ? policy.allowedChannelIds.filter(x => typeof x === "string").slice(0, 50) : [],
+    cooldownSeconds: Number.isInteger(policy.cooldownSeconds) ? Math.max(0, Math.min(3600, policy.cooldownSeconds)) : 0,
+    usageLimitPerHour: Number.isInteger(policy.usageLimitPerHour) ? Math.max(0, Math.min(10000, policy.usageLimitPerHour)) : 0,
     denialMessage: typeof policy.denialMessage === "string" && policy.denialMessage.trim() ? policy.denialMessage.slice(0, 1000) : COMMAND_DEFAULT_DENIAL
   };
 }
 function sanitizeCommandPolicy(input = {}, previous = {}) {
   const roles = Array.isArray(input.allowedRoleIds) ? input.allowedRoleIds : previous.allowedRoleIds || [];
   const users = Array.isArray(input.allowedUserIds) ? input.allowedUserIds : previous.allowedUserIds || [];
+  const channels = Array.isArray(input.allowedChannelIds) ? input.allowedChannelIds : previous.allowedChannelIds || [];
+  const cooldown = input.cooldownSeconds === undefined ? previous.cooldownSeconds : Number(input.cooldownSeconds);
+  const limit = input.usageLimitPerHour === undefined ? previous.usageLimitPerHour : Number(input.usageLimitPerHour);
   return {
     enabled: typeof input.enabled === "boolean" ? input.enabled : previous.enabled !== false,
     adminOnly: typeof input.adminOnly === "boolean" ? input.adminOnly : previous.adminOnly === true,
     allowedRoleIds: roles.filter(x => typeof x === "string" && /^\d{17,20}$/.test(x.trim())).map(x => x.trim()).slice(0, 50),
     allowedUserIds: users.filter(x => typeof x === "string" && /^\d{17,20}$/.test(x.trim())).map(x => x.trim()).slice(0, 50),
+    allowedChannelIds: channels.filter(x => typeof x === "string" && /^\d{17,20}$/.test(x.trim())).map(x => x.trim()).slice(0, 50),
+    cooldownSeconds: Number.isFinite(Number(cooldown)) ? Math.max(0, Math.min(3600, Math.floor(Number(cooldown)))) : 0,
+    usageLimitPerHour: Number.isFinite(Number(limit)) ? Math.max(0, Math.min(10000, Math.floor(Number(limit)))) : 0,
     denialMessage: typeof input.denialMessage === "string" ? input.denialMessage.trim().slice(0, 1000) || COMMAND_DEFAULT_DENIAL : previous.denialMessage || COMMAND_DEFAULT_DENIAL
   };
 }
-function commandCatalog() {
-  const names = [{ name: "giveaway", category: "Fun", kind: "slash" }, ...PREFIX_COMMAND_NAMES.map(name => ({ name, category: /^(ban|kick|mute|timeout|untimeout|unmute|unban|warn|unwarn|warns|lock|unlock|clear|purge|slowmode|giverole|removerole|setnick)$/.test(name) ? "Moderation" : /^(set|remove|clear|autorole|modalert|modlogs|modpdf|commands|activity|progress|listas|setmainchannel|setmedia|removemedia|setas|removeas|setdailyreportrole|setasprogressviewchannel|w|setspecialwelcomechannel)/.test(name) ? "Admin" : "Utility", kind: "prefix" }))];
-  return names.map(item => ({ ...item, ...getCommandPolicy(item.name) }));
+function commandCatalog(guildId = "") {
+  const names = [{ name: "giveaway", category: "Fun", kind: "slash", description: "Create and manage giveaways" }, ...PREFIX_COMMAND_NAMES.map(name => ({ name, category: /^(ban|kick|mute|timeout|untimeout|unmute|unban|warn|unwarn|warns|lock|unlock|clear|purge|slowmode|giverole|removerole|setnick)$/.test(name) ? "Moderation" : /^(set|remove|clear|autorole|modalert|modlogs|modpdf|commands|activity|progress|listas|setmainchannel|setmedia|removemedia|setas|removeas|setdailyreportrole|setasprogressviewchannel|w|setspecialwelcomechannel)/.test(name) ? "Admin" : "Utility", kind: "prefix", description: `Existing ${name} prefix command` }))];
+  return names.map(item => ({ ...item, ...getCommandPolicy(item.name, guildId) }));
 }
-function checkCommandAccess(name, member, userId, permissionBits = null) {
-  const policy = getCommandPolicy(name);
-  if (!policy.enabled) return { allowed: false, reason: "disabled", policy, message: `The \`${name === "giveaway" ? "/" : "?"}${name}\` command is currently disabled by the server administrator.` };
-  if (policy.allowedUserIds.includes(userId)) return { allowed: true, policy };
+function recordCommandEvent(guildId, name, status, reason = "") {
+  const gid = String(guildId || "global");
+  if (!dashboardCommandAnalytics[gid]) dashboardCommandAnalytics[gid] = {};
+  if (!dashboardCommandAnalytics[gid][name]) dashboardCommandAnalytics[gid][name] = { total: 0, allowed: 0, blocked: 0, reasons: {}, lastUsed: null };
+  const row = dashboardCommandAnalytics[gid][name];
+  row.total = (row.total || 0) + 1;
+  if (status === "allowed") row.allowed = (row.allowed || 0) + 1;
+  else { row.blocked = (row.blocked || 0) + 1; if (reason) row.reasons[reason] = (row.reasons[reason] || 0) + 1; }
+  row.lastUsed = new Date().toISOString();
+  saveJson(DASHBOARD_COMMAND_ANALYTICS_FILE, dashboardCommandAnalytics);
+}
+function checkCommandAccess(name, member, userId, permissionBits = null, guildId = "", channelId = "") {
+  const policy = getCommandPolicy(name, guildId);
+  if (!policy.enabled) return { allowed: false, reason: "disabled", policy, message: `The ${name === "giveaway" ? "/" : "?"}${name} command is currently disabled by the server administrator.` };
+  const explicitUser = policy.allowedUserIds.includes(userId);
   const roleIds = member?.roles?.cache ? [...member.roles.cache.keys()] : (Array.isArray(member?.roles) ? member.roles : []);
-  if (policy.allowedRoleIds.length && !policy.allowedRoleIds.some(id => roleIds.includes(id))) return { allowed: false, reason: "permission", policy };
+  if ((policy.allowedRoleIds.length || policy.allowedUserIds.length) && !explicitUser && !policy.allowedRoleIds.some(id => roleIds.includes(id))) return { allowed: false, reason: "permission", policy };
   const perms = permissionBits || member?.permissions;
-  if (policy.adminOnly && !(perms?.has?.(PermissionFlagsBits.Administrator) || perms?.has?.(PermissionFlagsBits.ManageGuild))) return { allowed: false, reason: "permission", policy };
+  if (!explicitUser && policy.adminOnly && !(perms?.has?.(PermissionFlagsBits.Administrator) || perms?.has?.(PermissionFlagsBits.ManageGuild))) return { allowed: false, reason: "permission", policy };
+  if (policy.allowedChannelIds.length && !policy.allowedChannelIds.includes(String(channelId))) return { allowed: false, reason: "channel", policy, message: "This command can only be used in the configured channels." };
+  const now = Date.now();
+  const cooldownKey = `${guildId}:${name}:${userId}`;
+  if (policy.cooldownSeconds > 0) {
+    const last = commandCooldowns.get(cooldownKey) || 0;
+    const waitMs = policy.cooldownSeconds * 1000 - (now - last);
+    if (waitMs > 0) return { allowed: false, reason: "cooldown", policy, message: `Please wait ${Math.ceil(waitMs / 1000)} second(s) before using this command again.` };
+  }
+  if (policy.usageLimitPerHour > 0) {
+    const usageKey = `${guildId}:${name}`;
+    const recent = (commandUsageWindows.get(usageKey) || []).filter(ts => now - ts < 3600000);
+    commandUsageWindows.set(usageKey, recent);
+    if (recent.length >= policy.usageLimitPerHour) return { allowed: false, reason: "hourly_limit", policy, message: "This command has reached its configured hourly usage limit." };
+    recent.push(now);
+    commandUsageWindows.set(usageKey, recent);
+  }
+  if (policy.cooldownSeconds > 0) commandCooldowns.set(cooldownKey, now);
   return { allowed: true, policy };
 }
 function formatCommandDenial(message, commandName, user) {
@@ -250,7 +294,7 @@ function startHealthServer() {
     }
 
     // Shared dashboard configuration is stored by the bot process, not only in browser localStorage.
-    if (["/api/dashboard-config", "/api/command-manager", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup", "/api/discord-roles", "/api/discord-role", "/api/auto-roles"].includes(pathname)) {
+    if (["/api/dashboard-config", "/api/command-manager", "/api/command-manager/audit", "/api/command-manager/analytics", "/api/command-manager/rollback", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup", "/api/discord-roles", "/api/discord-role"].includes(pathname)) {
       setApiHeaders(res);
       if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
       const auth = String(req.headers.authorization || "");
@@ -262,23 +306,65 @@ function startHealthServer() {
       }
       const sendJson = (status, payload) => { res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); res.end(JSON.stringify(payload)); };
       if (pathname === "/api/command-manager") {
-        if (req.method === "GET") return sendJson(200, { ok: true, commands: commandCatalog() });
+        const parsedUrl = new URL(req.url, "http://localhost");
+        const guildId = String(parsedUrl.searchParams.get("guildId") || "").trim();
+        if (req.method === "GET") {
+          if (guildId && !/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Invalid server ID." });
+          const commands = commandCatalog(guildId);
+          const stats = dashboardCommandAnalytics[guildId] || {};
+          return sendJson(200, { ok: true, guildId, commands: commands.map(c => ({ ...c, analytics: stats[c.name] || { total: 0, allowed: 0, blocked: 0, reasons: {}, lastUsed: null } })) });
+        }
         if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
         try {
           const body = await readJsonBody(req, 12000);
+          const targetGuild = String(body.guildId || guildId || "").trim();
           const name = String(body.name || "").trim().toLowerCase().replace(/^[/?]/, "");
           const known = name === "giveaway" || PREFIX_COMMAND_NAMES.includes(name);
+          if (!/^\d{17,20}$/.test(targetGuild)) return sendJson(400, { ok: false, error: "Choose a valid Discord server before saving command settings." });
           if (!known) return sendJson(400, { ok: false, error: "Unknown command. Only commands implemented in this bot can be managed." });
-          const previous = getCommandPolicy(name);
+          const previous = getCommandPolicy(name, targetGuild);
           const input = body.policy && typeof body.policy === "object" ? body.policy : body;
-          if (typeof input.enabled !== "boolean" && !["adminOnly", "allowedRoleIds", "allowedUserIds", "denialMessage"].some(k => Object.prototype.hasOwnProperty.call(input, k))) return sendJson(400, { ok: false, error: "Provide a command policy to update." });
-          dashboardCommandSettings[name] = sanitizeCommandPolicy(input, previous);
+          if (!Object.keys(input).some(k => ["enabled", "adminOnly", "allowedRoleIds", "allowedUserIds", "allowedChannelIds", "cooldownSeconds", "usageLimitPerHour", "denialMessage"].includes(k))) return sendJson(400, { ok: false, error: "Provide a command policy to update." });
+          const next = sanitizeCommandPolicy(input, previous);
+          if (!dashboardCommandSettings[targetGuild] || typeof dashboardCommandSettings[targetGuild] !== "object") dashboardCommandSettings[targetGuild] = {};
+          dashboardCommandSettings[targetGuild][name] = next;
           saveJson(DASHBOARD_COMMAND_FILE, dashboardCommandSettings);
-          console.log(`Command Manager updated: ${name} ${dashboardCommandSettings[name].enabled ? "enabled" : "disabled"}, adminOnly=${dashboardCommandSettings[name].adminOnly}`);
-          return sendJson(200, { ok: true, command: { name, ...getCommandPolicy(name) }, commands: commandCatalog() });
-        } catch (err) {
-          return sendJson(err.statusCode || 400, { ok: false, error: err.statusCode === 413 ? "Request body too large" : "Invalid command manager request." });
-        }
+          const audit = { id: crypto.randomUUID(), at: new Date().toISOString(), guildId: targetGuild, command: name, action: "update", before: previous, after: next };
+          dashboardCommandAudit.unshift(audit); dashboardCommandAudit = dashboardCommandAudit.slice(0, 500); saveJson(DASHBOARD_COMMAND_AUDIT_FILE, dashboardCommandAudit);
+          console.log(`Command Manager updated: guild=${targetGuild} command=${name} enabled=${next.enabled}`);
+          return sendJson(200, { ok: true, command: { name, ...next }, commands: commandCatalog(targetGuild), auditId: audit.id });
+        } catch (err) { return sendJson(err.statusCode || 400, { ok: false, error: err.statusCode === 413 ? "Request body too large" : "Invalid command manager request." }); }
+      }
+      if (pathname === "/api/command-manager/audit") {
+        if (req.method !== "GET") return sendJson(405, { ok: false, error: "Method not allowed" });
+        const parsedUrl = new URL(req.url, "http://localhost");
+        const guildId = String(parsedUrl.searchParams.get("guildId") || "").trim();
+        const command = String(parsedUrl.searchParams.get("command") || "").trim().toLowerCase();
+        const rows = dashboardCommandAudit.filter(x => (!guildId || x.guildId === guildId) && (!command || x.command === command)).slice(0, 100);
+        return sendJson(200, { ok: true, audit: rows });
+      }
+      if (pathname === "/api/command-manager/analytics") {
+        if (req.method !== "GET") return sendJson(405, { ok: false, error: "Method not allowed" });
+        const parsedUrl = new URL(req.url, "http://localhost");
+        const guildId = String(parsedUrl.searchParams.get("guildId") || "").trim();
+        if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Choose a valid server." });
+        return sendJson(200, { ok: true, guildId, analytics: dashboardCommandAnalytics[guildId] || {} });
+      }
+      if (pathname === "/api/command-manager/rollback") {
+        if (req.method !== "POST") return sendJson(405, { ok: false, error: "Method not allowed" });
+        try {
+          const body = await readJsonBody(req, 5000);
+          const guildId = String(body.guildId || "").trim();
+          const auditId = String(body.auditId || "").trim();
+          const entry = dashboardCommandAudit.find(x => x.id === auditId && x.guildId === guildId && x.action === "update");
+          if (!/^\d{17,20}$/.test(guildId) || !entry) return sendJson(404, { ok: false, error: "That command change could not be found for this server." });
+          if (!dashboardCommandSettings[guildId] || typeof dashboardCommandSettings[guildId] !== "object") dashboardCommandSettings[guildId] = {};
+          dashboardCommandSettings[guildId][entry.command] = sanitizeCommandPolicy(entry.before || {}, getCommandPolicy(entry.command, guildId));
+          saveJson(DASHBOARD_COMMAND_FILE, dashboardCommandSettings);
+          const rollback = { id: crypto.randomUUID(), at: new Date().toISOString(), guildId, command: entry.command, action: "rollback", before: entry.after, after: dashboardCommandSettings[guildId][entry.command], rolledBackAuditId: auditId };
+          dashboardCommandAudit.unshift(rollback); dashboardCommandAudit = dashboardCommandAudit.slice(0, 500); saveJson(DASHBOARD_COMMAND_AUDIT_FILE, dashboardCommandAudit);
+          return sendJson(200, { ok: true, command: { name: entry.command, ...getCommandPolicy(entry.command, guildId) }, commands: commandCatalog(guildId) });
+        } catch (err) { return sendJson(err.statusCode || 400, { ok: false, error: "Invalid rollback request." }); }
       }
       if (pathname === "/api/dashboard-config") {
         if (req.method === "GET") return sendJson(200, { ok: true, config: dashboardConfig });
@@ -324,48 +410,6 @@ function startHealthServer() {
         const roles = await guild.roles.fetch().catch(() => null);
         if (!roles) return sendJson(500, { ok: false, error: "Could not fetch roles for this server." });
         return sendJson(200, { ok: true, guild: { id: guild.id, name: guild.name }, permissionOptions: Object.keys(PermissionFlagsBits).filter(k => !/^\d+$/.test(k)), roles: [...roles.values()].sort((a,b) => b.position-a.position).map(role => ({ id: role.id, name: role.name, color: role.hexColor, position: role.position, managed: role.managed, permissions: role.permissions.toArray(), editable: !role.managed && role.id !== guild.id })) });
-      }
-      if (pathname === "/api/auto-roles") {
-        const parsedUrl = new URL(req.url, "http://localhost");
-        if (req.method === "GET") {
-          const guildId = String(parsedUrl.searchParams.get("guildId") || "").trim();
-          if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Select a valid Discord server first." });
-          if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
-          const guild = await client.guilds.fetch(guildId).catch(() => null);
-          if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
-          const roles = await guild.roles.fetch().catch(() => null);
-          if (!roles) return sendJson(500, { ok: false, error: "Could not fetch server roles." });
-          const configured = new Set(getAutoRoleIds(guild.id));
-          const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
-          return sendJson(200, { ok: true, guild: { id: guild.id, name: guild.name }, roleIds: [...configured], roles: [...roles.values()].sort((a,b) => b.position-a.position).map(role => ({ id: role.id, name: role.name, color: role.hexColor, position: role.position, managed: role.managed, everyone: role.id === guild.id, assignable: !role.managed && role.id !== guild.id && !!botMember && role.position < botMember.roles.highest.position })) });
-        }
-        if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
-        try {
-          const body = await readJsonBody(req, 12000);
-          const guildId = String(body.guildId || "").trim();
-          if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Select a valid Discord server." });
-          if (!Array.isArray(body.roleIds)) return sendJson(400, { ok: false, error: "Choose the roles to give to new members." });
-          if (body.roleIds.length > 50) return sendJson(400, { ok: false, error: "You can select up to 50 automatic roles." });
-          if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
-          const guild = await client.guilds.fetch(guildId).catch(() => null);
-          if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
-          const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
-          if (!botMember?.permissions.has(PermissionFlagsBits.ManageRoles)) return sendJson(403, { ok: false, error: "LEADER needs Manage Roles permission to configure automatic roles." });
-          const roleIds = [...new Set(body.roleIds.filter(id => typeof id === "string" && /^\d{17,20}$/.test(id)))];
-          const roles = await guild.roles.fetch();
-          for (const roleId of roleIds) {
-            const role = roles.get(roleId);
-            if (!role) return sendJson(400, { ok: false, error: "One of the selected roles no longer exists. Refresh the role list and try again." });
-            if (role.managed || role.id === guild.id || role.position >= botMember.roles.highest.position) return sendJson(400, { ok: false, error: `The role “${role.name}” cannot be assigned by LEADER. Move it below the bot's highest role or choose another role.` });
-          }
-          autoRoleConfig[guild.id] = roleIds;
-          saveAutoRoles();
-          console.log(`[AUTO ROLES] Dashboard saved ${roleIds.length} role(s) for guild ${guild.id}`);
-          return sendJson(200, { ok: true, guildId: guild.id, roleIds, message: `Automatic roles saved. New members will receive ${roleIds.length} role(s).` });
-        } catch (err) {
-          console.error("Dashboard auto-role update failed:", err);
-          return sendJson(err.statusCode || 400, { ok: false, error: err.statusCode === 413 ? "Request body too large" : "Could not save automatic roles." });
-        }
       }
       if (pathname === "/api/discord-role") {
         if (!["PUT", "POST", "DELETE"].includes(req.method)) return sendJson(405, { ok: false, error: "Method not allowed" });
@@ -1810,7 +1854,8 @@ client.on(
     if (lowerContent.startsWith("?")) {
       const prefixName = lowerContent.split(/\s+/)[0].slice(1).replace(/[^a-z0-9_-]/g, "");
       if (prefixName && (PREFIX_COMMAND_NAMES.includes(prefixName) || Object.prototype.hasOwnProperty.call(dashboardCommandSettings, prefixName))) {
-        const access = checkCommandAccess(prefixName, message.member, message.author.id);
+        const access = checkCommandAccess(prefixName, message.member, message.author.id, null, message.guild.id, message.channel.id);
+        recordCommandEvent(message.guild.id, prefixName, access.allowed ? "allowed" : "blocked", access.reason || "");
         if (!access.allowed) {
           const denial = formatCommandDenial(access.policy?.denialMessage, `?${prefixName}`, message.author);
           await message.reply({ content: denial, allowedMentions: { users: [message.author.id] } }).catch(() => {});
@@ -3372,7 +3417,8 @@ client.on(
 
       // Apply the same live policy to every registered slash command.
       if (interaction.isChatInputCommand()) {
-        const access = checkCommandAccess(interaction.commandName, interaction.member, interaction.user.id, interaction.memberPermissions);
+        const access = checkCommandAccess(interaction.commandName, interaction.member, interaction.user.id, interaction.memberPermissions, interaction.guild.id, interaction.channelId);
+        recordCommandEvent(interaction.guild.id, interaction.commandName, access.allowed ? "allowed" : "blocked", access.reason || "");
         if (!access.allowed) {
           const denial = formatCommandDenial(access.policy?.denialMessage, `/${interaction.commandName}`, interaction.user);
           if (!interaction.deferred && !interaction.replied) {
