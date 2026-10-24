@@ -80,8 +80,55 @@ const DASHBOARD_SPAM_FILE = path.join(__dirname, "dashboard-antispam.json");
 const DASHBOARD_CONFIG_FILE = path.join(__dirname, "dashboard-config.json");
 const DASHBOARD_COMMAND_FILE = path.join(__dirname, "dashboard-command-manager.json");
 let dashboardConfig = loadJson(DASHBOARD_CONFIG_FILE, {});
-let dashboardCommandSettings = loadJson(DASHBOARD_COMMAND_FILE, { giveaway: true });
-if (typeof dashboardCommandSettings.giveaway !== "boolean") dashboardCommandSettings.giveaway = true;
+let dashboardCommandSettings = loadJson(DASHBOARD_COMMAND_FILE, {});
+// Migrate the earlier { giveaway: true/false } format to per-command policies.
+if (typeof dashboardCommandSettings.giveaway === "boolean") {
+  dashboardCommandSettings = { giveaway: { enabled: dashboardCommandSettings.giveaway } };
+}
+const PREFIX_COMMAND_NAMES = [
+  "activity", "addinsta", "afk", "autoroles", "ban", "channellog", "clear", "clearautoroles", "commands", "giverole", "insta", "kick", "listas", "lock", "memberlog", "messagelog", "modalertstatus", "modalerttest", "modpdf", "modlogs", "mute", "progress", "purge", "removeas", "removeautorole", "removeinsta", "removemedia", "removerole", "resetalert", "rolelog", "setalerttime", "setas", "setasprogressviewchannel", "setautorole", "setchannellog", "setchatmod", "setdailyreportrole", "setmainchannel", "setmedia", "setmemberlog", "setmessagelog", "setminreqchat", "setminreqvc", "setmodalert", "setmodlogs", "setnick", "setrolelog", "setvcmod", "setvoicelog", "slowmode", "timeout", "unban", "unlock", "unmute", "untimeout", "unwarn", "voicelog", "warn", "warns", "w", "setspecialwelcomechannel"
+];
+const COMMAND_DEFAULT_DENIAL = "{user}, you don't have permission to use `{command}`.";
+function getCommandPolicy(name) {
+  const raw = dashboardCommandSettings[name];
+  const policy = raw && typeof raw === "object" ? raw : {};
+  return {
+    enabled: policy.enabled !== false,
+    adminOnly: policy.adminOnly === true,
+    allowedRoleIds: Array.isArray(policy.allowedRoleIds) ? policy.allowedRoleIds.filter(x => typeof x === "string").slice(0, 50) : [],
+    allowedUserIds: Array.isArray(policy.allowedUserIds) ? policy.allowedUserIds.filter(x => typeof x === "string").slice(0, 50) : [],
+    denialMessage: typeof policy.denialMessage === "string" && policy.denialMessage.trim() ? policy.denialMessage.slice(0, 1000) : COMMAND_DEFAULT_DENIAL
+  };
+}
+function sanitizeCommandPolicy(input = {}, previous = {}) {
+  const roles = Array.isArray(input.allowedRoleIds) ? input.allowedRoleIds : previous.allowedRoleIds || [];
+  const users = Array.isArray(input.allowedUserIds) ? input.allowedUserIds : previous.allowedUserIds || [];
+  return {
+    enabled: typeof input.enabled === "boolean" ? input.enabled : previous.enabled !== false,
+    adminOnly: typeof input.adminOnly === "boolean" ? input.adminOnly : previous.adminOnly === true,
+    allowedRoleIds: roles.filter(x => typeof x === "string" && /^\d{17,20}$/.test(x.trim())).map(x => x.trim()).slice(0, 50),
+    allowedUserIds: users.filter(x => typeof x === "string" && /^\d{17,20}$/.test(x.trim())).map(x => x.trim()).slice(0, 50),
+    denialMessage: typeof input.denialMessage === "string" ? input.denialMessage.trim().slice(0, 1000) || COMMAND_DEFAULT_DENIAL : previous.denialMessage || COMMAND_DEFAULT_DENIAL
+  };
+}
+function commandCatalog() {
+  const names = [{ name: "giveaway", category: "Fun", kind: "slash" }, ...PREFIX_COMMAND_NAMES.map(name => ({ name, category: /^(ban|kick|mute|timeout|untimeout|unmute|unban|warn|unwarn|warns|lock|unlock|clear|purge|slowmode|giverole|removerole|setnick)$/.test(name) ? "Moderation" : /^(set|remove|clear|autorole|modalert|modlogs|modpdf|commands|activity|progress|listas|setmainchannel|setmedia|removemedia|setas|removeas|setdailyreportrole|setasprogressviewchannel|w|setspecialwelcomechannel)/.test(name) ? "Admin" : "Utility", kind: "prefix" }))];
+  return names.map(item => ({ ...item, ...getCommandPolicy(item.name) }));
+}
+function checkCommandAccess(name, member, userId, permissionBits = null) {
+  const policy = getCommandPolicy(name);
+  if (!policy.enabled) return { allowed: false, reason: "disabled", policy, message: `The \`${name === "giveaway" ? "/" : "?"}${name}\` command is currently disabled by the server administrator.` };
+  if (policy.allowedUserIds.includes(userId)) return { allowed: true, policy };
+  const roleIds = member?.roles?.cache ? [...member.roles.cache.keys()] : (Array.isArray(member?.roles) ? member.roles : []);
+  if (policy.allowedRoleIds.length && !policy.allowedRoleIds.some(id => roleIds.includes(id))) return { allowed: false, reason: "permission", policy };
+  const perms = permissionBits || member?.permissions;
+  if (policy.adminOnly && !(perms?.has?.(PermissionFlagsBits.Administrator) || perms?.has?.(PermissionFlagsBits.ManageGuild))) return { allowed: false, reason: "permission", policy };
+  return { allowed: true, policy };
+}
+function formatCommandDenial(message, commandName, user) {
+  const template = message || COMMAND_DEFAULT_DENIAL;
+  return template.replace(/\{user\}/g, `<@${user.id}>`).replace(/\{username\}/g, user.username || "user").replace(/\{command\}/g, commandName.startsWith("?") || commandName.startsWith("/") ? commandName : `?${commandName}`);
+}
 const DASHBOARD_API_KEY = String(process.env.DASHBOARD_API_KEY || "");
 const DEFAULT_ANTI_SPAM_SETTINGS = Object.freeze({
   enabled: true,
@@ -210,19 +257,20 @@ function startHealthServer() {
       }
       const sendJson = (status, payload) => { res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); res.end(JSON.stringify(payload)); };
       if (pathname === "/api/command-manager") {
-        if (req.method === "GET") {
-          return sendJson(200, { ok: true, commands: [{ name: "giveaway", category: "Fun", enabled: dashboardCommandSettings.giveaway === true }] });
-        }
+        if (req.method === "GET") return sendJson(200, { ok: true, commands: commandCatalog() });
         if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
         try {
-          const body = await readJsonBody(req, 5000);
-          const name = String(body.name || "").trim().toLowerCase();
-          if (name !== "giveaway") return sendJson(400, { ok: false, error: "Only the registered /giveaway command is supported." });
-          if (typeof body.enabled !== "boolean") return sendJson(400, { ok: false, error: "enabled must be true or false." });
-          dashboardCommandSettings.giveaway = body.enabled;
+          const body = await readJsonBody(req, 12000);
+          const name = String(body.name || "").trim().toLowerCase().replace(/^[/?]/, "");
+          const known = name === "giveaway" || PREFIX_COMMAND_NAMES.includes(name);
+          if (!known) return sendJson(400, { ok: false, error: "Unknown command. Only commands implemented in this bot can be managed." });
+          const previous = getCommandPolicy(name);
+          const input = body.policy && typeof body.policy === "object" ? body.policy : body;
+          if (typeof input.enabled !== "boolean" && !["adminOnly", "allowedRoleIds", "allowedUserIds", "denialMessage"].some(k => Object.prototype.hasOwnProperty.call(input, k))) return sendJson(400, { ok: false, error: "Provide a command policy to update." });
+          dashboardCommandSettings[name] = sanitizeCommandPolicy(input, previous);
           saveJson(DASHBOARD_COMMAND_FILE, dashboardCommandSettings);
-          console.log(`Command Manager: /giveaway ${body.enabled ? "enabled" : "disabled"}.`);
-          return sendJson(200, { ok: true, commands: [{ name: "giveaway", category: "Fun", enabled: dashboardCommandSettings.giveaway }] });
+          console.log(`Command Manager updated: ${name} ${dashboardCommandSettings[name].enabled ? "enabled" : "disabled"}, adminOnly=${dashboardCommandSettings[name].adminOnly}`);
+          return sendJson(200, { ok: true, command: { name, ...getCommandPolicy(name) }, commands: commandCatalog() });
         } catch (err) {
           return sendJson(err.statusCode || 400, { ok: false, error: err.statusCode === 413 ? "Request body too large" : "Invalid command manager request." });
         }
@@ -1650,15 +1698,26 @@ client.on(
       return;
     }
 
-    // Special welcome commands (?setspecialwelcomechannel / ?w).
-    // Handle these before the rest of Leader's commands so the welcome
-    // feature is actually connected to the main message handler.
-    const specialWelcomeHandled = await specialWelcome.handleMessage(message);
-    if (specialWelcomeHandled) return;
-
     const content = message.content.trim();
     const lowerContent = content.toLowerCase();
     const manageGuild = message.member?.permissions.has(PermissionFlagsBits.ManageGuild) ?? false;
+
+    // Enforce Command Manager policies before any prefix-command handler runs.
+    if (lowerContent.startsWith("?")) {
+      const prefixName = lowerContent.split(/\s+/)[0].slice(1).replace(/[^a-z0-9_-]/g, "");
+      if (prefixName && (PREFIX_COMMAND_NAMES.includes(prefixName) || Object.prototype.hasOwnProperty.call(dashboardCommandSettings, prefixName))) {
+        const access = checkCommandAccess(prefixName, message.member, message.author.id);
+        if (!access.allowed) {
+          const denial = formatCommandDenial(access.policy?.denialMessage, `?${prefixName}`, message.author);
+          await message.reply({ content: denial, allowedMentions: { users: [message.author.id] } }).catch(() => {});
+          return;
+        }
+      }
+    }
+
+    // Run special-welcome prefix handlers only after command permissions have passed.
+    const specialWelcomeHandled = await specialWelcome.handleMessage(message);
+    if (specialWelcomeHandled) return;
 
     // Send the command reference PDF by DM.
     if (["?modpdf", "?commands"].includes(lowerContent)) {
@@ -3207,6 +3266,18 @@ client.on(
         return;
       }
 
+      // Apply the same live policy to every registered slash command.
+      if (interaction.isChatInputCommand()) {
+        const access = checkCommandAccess(interaction.commandName, interaction.member, interaction.user.id, interaction.memberPermissions);
+        if (!access.allowed) {
+          const denial = formatCommandDenial(access.policy?.denialMessage, `/${interaction.commandName}`, interaction.user);
+          if (!interaction.deferred && !interaction.replied) {
+            return interaction.reply({ content: denial, ephemeral: true }).catch(() => {});
+          }
+          return interaction.editReply({ content: denial }).catch(() => {});
+        }
+      }
+
       /*
        * A Discord interaction must be acknowledged within ~3 seconds.
        * Acknowledge normal slash commands immediately, before any command
@@ -3325,13 +3396,6 @@ client.on(
         interaction.commandName ===
         "giveaway"
       ) {
-        if (dashboardCommandSettings.giveaway !== true) {
-          return interaction.reply({
-            content: "The /giveaway command is currently disabled by the server dashboard.",
-            ephemeral: true
-          }).catch(() => {});
-        }
-
         try {
 
           return await giveawayCommand.execute(
