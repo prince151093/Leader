@@ -77,6 +77,8 @@ if (!config.clientId) {
 ========================= */
 
 const DASHBOARD_SPAM_FILE = path.join(__dirname, "dashboard-antispam.json");
+const DASHBOARD_CONFIG_FILE = path.join(__dirname, "dashboard-config.json");
+let dashboardConfig = loadJson(DASHBOARD_CONFIG_FILE, {});
 const DASHBOARD_API_KEY = String(process.env.DASHBOARD_API_KEY || "");
 const DEFAULT_ANTI_SPAM_SETTINGS = Object.freeze({
   enabled: true,
@@ -121,12 +123,12 @@ function isValidDashboardKey(supplied) {
 function setApiHeaders(res) {
   // Local-file dashboard prototype requires CORS. Keep API key private and use HTTPS in production.
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, PUT, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Cache-Control", "no-store");
 }
 
-function readJsonBody(req, maxBytes = 12000) {
+function readJsonBody(req, maxBytes = 60000) {
   return new Promise((resolve, reject) => {
     let body = "";
     req.on("data", chunk => {
@@ -190,6 +192,70 @@ function startHealthServer() {
       res.writeHead(405, { "Content-Type": "application/json; charset=utf-8", Allow: "GET, PUT, OPTIONS" });
       res.end(JSON.stringify({ ok: false, error: "Method not allowed" }));
       return;
+    }
+
+    // Shared dashboard configuration is stored by the bot process, not only in browser localStorage.
+    if (pathname === "/api/dashboard-config" || pathname === "/api/send-message") {
+      setApiHeaders(res);
+      if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+      const auth = String(req.headers.authorization || "");
+      const suppliedKey = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+      if (!isValidDashboardKey(suppliedKey)) {
+        res.writeHead(DASHBOARD_API_KEY ? 401 : 503, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: DASHBOARD_API_KEY ? "Unauthorized" : "Dashboard API is not configured. Set DASHBOARD_API_KEY in the service environment." }));
+        return;
+      }
+      const sendJson = (status, payload) => { res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); res.end(JSON.stringify(payload)); };
+      if (pathname === "/api/dashboard-config") {
+        if (req.method === "GET") return sendJson(200, { ok: true, config: dashboardConfig });
+        if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
+        try {
+          const body = await readJsonBody(req, 60000);
+          const incoming = body.config;
+          if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) return sendJson(400, { ok: false, error: "config must be an object" });
+          // Bound payload size and keep only JSON-serializable configuration data.
+          const serialized = JSON.stringify(incoming);
+          if (Buffer.byteLength(serialized) > 50000) return sendJson(413, { ok: false, error: "Configuration is too large (50 KB maximum)" });
+          dashboardConfig = JSON.parse(serialized);
+          saveJson(DASHBOARD_CONFIG_FILE, dashboardConfig);
+          console.log("Dashboard configuration saved to bot-side storage.");
+          return sendJson(200, { ok: true, config: dashboardConfig });
+        } catch (err) { return sendJson(err.statusCode || 400, { ok: false, error: err.statusCode === 413 ? "Request body too large" : "Invalid dashboard configuration" }); }
+      }
+      if (pathname === "/api/send-message") {
+        if (req.method !== "POST") return sendJson(405, { ok: false, error: "Method not allowed" });
+        try {
+          const body = await readJsonBody(req, 12000);
+          const guildId = String(body.guildId || "").trim();
+          const channelId = String(body.channelId || "").trim();
+          const type = body.type === "plain" ? "plain" : "embed";
+          const text = String(body.body || "").slice(0, 2000);
+          const title = String(body.title || "").slice(0, 256);
+          const footer = String(body.footer || "").slice(0, 2048);
+          const colorRaw = String(body.color || "#7296ff");
+          if (!/^\d{17,20}$/.test(guildId) || !/^\d{17,20}$/.test(channelId)) return sendJson(400, { ok: false, error: "Enter valid Discord server ID and channel ID (17–20 digits)." });
+          if (!text.trim()) return sendJson(400, { ok: false, error: "Message body cannot be empty." });
+          if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+          const guild = await client.guilds.fetch(guildId).catch(() => null);
+          if (!guild) return sendJson(404, { ok: false, error: "The bot is not in that server, or the server ID is invalid." });
+          const channel = await guild.channels.fetch(channelId).catch(() => null);
+          if (!channel || !channel.isTextBased() || !channel.send) return sendJson(404, { ok: false, error: "Text channel not found in that server." });
+          const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
+          const perms = me && channel.permissionsFor(me);
+          if (!perms || !perms.has(PermissionFlagsBits.ViewChannel) || !perms.has(PermissionFlagsBits.SendMessages)) return sendJson(403, { ok: false, error: "The bot needs View Channel and Send Messages permissions in the target channel." });
+          if (type === "embed" && !perms.has(PermissionFlagsBits.EmbedLinks)) return sendJson(403, { ok: false, error: "The bot also needs Embed Links permission for embeds." });
+          if (type === "plain") await channel.send({ content: text, allowedMentions: { parse: [] } });
+          else {
+            const color = /^#[0-9a-fA-F]{6}$/.test(colorRaw) ? parseInt(colorRaw.slice(1), 16) : 0x7296ff;
+            const embed = new EmbedBuilder().setColor(color).setDescription(text);
+            if (title) embed.setTitle(title);
+            if (footer) embed.setFooter({ text: footer });
+            await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+          }
+          console.log(`Dashboard sent ${type} message to guild ${guildId}, channel ${channelId}.`);
+          return sendJson(200, { ok: true, message: "Message sent successfully." });
+        } catch (err) { console.error("Dashboard send-message error:", err); return sendJson(500, { ok: false, error: "Could not send message. Check bot logs and channel permissions." }); }
+      }
     }
 
     if (pathname === "/health" || pathname === "/") {
