@@ -326,36 +326,44 @@ function startHealthServer() {
         return sendJson(200, { ok: true, guild: { id: guild.id, name: guild.name }, permissionOptions: Object.keys(PermissionFlagsBits).filter(k => !/^\d+$/.test(k)), roles: [...roles.values()].sort((a,b) => b.position-a.position).map(role => ({ id: role.id, name: role.name, color: role.hexColor, position: role.position, managed: role.managed, permissions: role.permissions.toArray(), editable: !role.managed && role.id !== guild.id })) });
       }
       if (pathname === "/api/discord-role") {
-        if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
+        if (!["PUT", "POST", "DELETE"].includes(req.method)) return sendJson(405, { ok: false, error: "Method not allowed" });
         try {
           const body = await readJsonBody(req, 12000);
           const guildId = String(body.guildId || "").trim();
           const roleId = String(body.roleId || "").trim();
-          if (!/^\d{17,20}$/.test(guildId) || !/^\d{17,20}$/.test(roleId)) return sendJson(400, { ok: false, error: "Select a valid server and role." });
+          if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Select a valid server." });
           if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
           const guild = await client.guilds.fetch(guildId).catch(() => null);
           if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
-          const role = await guild.roles.fetch(roleId).catch(() => null);
-          if (!role) return sendJson(404, { ok: false, error: "That role was not found in the selected server." });
           const botMember = await guild.members.fetchMe().catch(() => null);
           if (!botMember?.permissions.has(PermissionFlagsBits.ManageRoles)) return sendJson(403, { ok: false, error: "LEADER needs Manage Roles permission." });
-          if (role.managed || role.id === guild.id || role.position >= botMember.roles.highest.position) return sendJson(403, { ok: false, error: "This role is managed by Discord, is @everyone, or is at/above LEADER's highest role." });
-          const changes = {};
-          if (typeof body.name === "string") {
-            const name = body.name.trim();
+          const valid = new Set(Object.keys(PermissionFlagsBits));
+          const perms = Array.isArray(body.permissions) ? [...new Set(body.permissions.filter(x => typeof x === "string" && valid.has(x)))] : [];
+          const color = typeof body.color === "string" ? body.color : "#000000";
+          if (!/^#[0-9a-fA-F]{6}$/.test(color)) return sendJson(400, { ok: false, error: "Role color must be a six-digit hex color." });
+          if (req.method === "POST") {
+            const name = String(body.name || "").trim();
             if (!name || name.length > 100) return sendJson(400, { ok: false, error: "Role name must be 1–100 characters." });
-            changes.name = name;
+            const created = await guild.roles.create({ name, color, permissions: perms, reason: "Role created from LEADER dashboard" });
+            return sendJson(201, { ok: true, role: { id: created.id, name: created.name, color: created.hexColor, position: created.position, managed: created.managed, permissions: created.permissions.toArray(), editable: true } });
           }
-          if (Array.isArray(body.permissions)) {
-            const valid = new Set(Object.keys(PermissionFlagsBits));
-            const perms = [...new Set(body.permissions.filter(x => typeof x === "string" && valid.has(x)))];
-            changes.permissions = perms;
+          if (!/^\d{17,20}$/.test(roleId)) return sendJson(400, { ok: false, error: "Select a valid role." });
+          const role = await guild.roles.fetch(roleId).catch(() => null);
+          if (!role) return sendJson(404, { ok: false, error: "That role was not found in the selected server." });
+          if (role.managed || role.id === guild.id || role.position >= botMember.roles.highest.position) return sendJson(403, { ok: false, error: "This role is managed by Discord, is @everyone, or is at/above LEADER's highest role." });
+          if (req.method === "DELETE") {
+            await role.delete("Role deleted from LEADER dashboard");
+            return sendJson(200, { ok: true, deleted: true, roleId });
           }
+          const changes = {};
+          if (typeof body.name === "string") { const name = body.name.trim(); if (!name || name.length > 100) return sendJson(400, { ok: false, error: "Role name must be 1–100 characters." }); changes.name = name; }
+          if (Array.isArray(body.permissions)) changes.permissions = perms;
+          if (typeof body.color === "string") changes.color = color;
           if (!Object.keys(changes).length) return sendJson(400, { ok: false, error: "No role changes supplied." });
-          await role.edit(changes, `Role updated from LEADER dashboard by authorized dashboard key`);
+          await role.edit(changes, "Role updated from LEADER dashboard by authorized dashboard key");
           const updated = await guild.roles.fetch(roleId);
           return sendJson(200, { ok: true, role: { id: updated.id, name: updated.name, color: updated.hexColor, position: updated.position, managed: updated.managed, permissions: updated.permissions.toArray(), editable: !updated.managed && updated.id !== guild.id } });
-        } catch (err) { console.error("Dashboard role update error:", err); return sendJson(err.statusCode || 500, { ok: false, error: err.statusCode === 500 ? "Could not update role. Check LEADER's permissions and role hierarchy." : "Invalid role update request." }); }
+        } catch (err) { console.error("Dashboard role operation error:", err); return sendJson(err.statusCode || 500, { ok: false, error: err.message && err.code ? `Discord API error (${err.code}): ${err.message}` : (err.statusCode === 500 ? "Could not change role. Check LEADER's permissions and role hierarchy." : "Invalid role request.") }); }
       }
       if (pathname === "/api/discord-channels") {
         if (req.method !== "GET") return sendJson(405, { ok: false, error: "Method not allowed" });
