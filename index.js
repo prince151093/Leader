@@ -78,7 +78,10 @@ if (!config.clientId) {
 
 const DASHBOARD_SPAM_FILE = path.join(__dirname, "dashboard-antispam.json");
 const DASHBOARD_CONFIG_FILE = path.join(__dirname, "dashboard-config.json");
+const DASHBOARD_COMMAND_FILE = path.join(__dirname, "dashboard-command-manager.json");
 let dashboardConfig = loadJson(DASHBOARD_CONFIG_FILE, {});
+let dashboardCommandSettings = loadJson(DASHBOARD_COMMAND_FILE, { giveaway: true });
+if (typeof dashboardCommandSettings.giveaway !== "boolean") dashboardCommandSettings.giveaway = true;
 const DASHBOARD_API_KEY = String(process.env.DASHBOARD_API_KEY || "");
 const DEFAULT_ANTI_SPAM_SETTINGS = Object.freeze({
   enabled: true,
@@ -195,7 +198,7 @@ function startHealthServer() {
     }
 
     // Shared dashboard configuration is stored by the bot process, not only in browser localStorage.
-    if (["/api/dashboard-config", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup"].includes(pathname)) {
+    if (["/api/dashboard-config", "/api/command-manager", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup"].includes(pathname)) {
       setApiHeaders(res);
       if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
       const auth = String(req.headers.authorization || "");
@@ -206,6 +209,24 @@ function startHealthServer() {
         return;
       }
       const sendJson = (status, payload) => { res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); res.end(JSON.stringify(payload)); };
+      if (pathname === "/api/command-manager") {
+        if (req.method === "GET") {
+          return sendJson(200, { ok: true, commands: [{ name: "giveaway", category: "Fun", enabled: dashboardCommandSettings.giveaway === true }] });
+        }
+        if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
+        try {
+          const body = await readJsonBody(req, 5000);
+          const name = String(body.name || "").trim().toLowerCase();
+          if (name !== "giveaway") return sendJson(400, { ok: false, error: "Only the registered /giveaway command is supported." });
+          if (typeof body.enabled !== "boolean") return sendJson(400, { ok: false, error: "enabled must be true or false." });
+          dashboardCommandSettings.giveaway = body.enabled;
+          saveJson(DASHBOARD_COMMAND_FILE, dashboardCommandSettings);
+          console.log(`Command Manager: /giveaway ${body.enabled ? "enabled" : "disabled"}.`);
+          return sendJson(200, { ok: true, commands: [{ name: "giveaway", category: "Fun", enabled: dashboardCommandSettings.giveaway }] });
+        } catch (err) {
+          return sendJson(err.statusCode || 400, { ok: false, error: err.statusCode === 413 ? "Request body too large" : "Invalid command manager request." });
+        }
+      }
       if (pathname === "/api/dashboard-config") {
         if (req.method === "GET") return sendJson(200, { ok: true, config: dashboardConfig });
         if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
@@ -3304,6 +3325,12 @@ client.on(
         interaction.commandName ===
         "giveaway"
       ) {
+        if (dashboardCommandSettings.giveaway !== true) {
+          return interaction.reply({
+            content: "The /giveaway command is currently disabled by the server dashboard.",
+            ephemeral: true
+          }).catch(() => {});
+        }
 
         try {
 
