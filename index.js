@@ -195,7 +195,7 @@ function startHealthServer() {
     }
 
     // Shared dashboard configuration is stored by the bot process, not only in browser localStorage.
-    if (pathname === "/api/dashboard-config" || pathname === "/api/send-message") {
+    if (["/api/dashboard-config", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup"].includes(pathname)) {
       setApiHeaders(res);
       if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
       const auth = String(req.headers.authorization || "");
@@ -221,6 +221,51 @@ function startHealthServer() {
           console.log("Dashboard configuration saved to bot-side storage.");
           return sendJson(200, { ok: true, config: dashboardConfig });
         } catch (err) { return sendJson(err.statusCode || 400, { ok: false, error: err.statusCode === 413 ? "Request body too large" : "Invalid dashboard configuration" }); }
+      }
+      if (pathname === "/api/discord-servers") {
+        if (req.method !== "GET") return sendJson(405, { ok: false, error: "Method not allowed" });
+        if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+        return sendJson(200, { ok: true, servers: client.guilds.cache.map(g => ({ id: g.id, name: g.name })).sort((a, b) => a.name.localeCompare(b.name)) });
+      }
+      if (pathname === "/api/discord-server-lookup") {
+        if (req.method !== "POST") return sendJson(405, { ok: false, error: "Method not allowed" });
+        try {
+          const body = await readJsonBody(req, 5000);
+          const guildId = String(body.guildId || "").trim();
+          if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Enter a valid Discord server ID (17–20 digits)." });
+          if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+          const guild = await client.guilds.fetch(guildId).catch(() => null);
+          if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server, or the server ID is invalid." });
+          return sendJson(200, { ok: true, server: { id: guild.id, name: guild.name } });
+        } catch (err) { return sendJson(err.statusCode || 400, { ok: false, error: "Invalid server lookup request." }); }
+      }
+      if (pathname === "/api/discord-channels") {
+        if (req.method !== "GET") return sendJson(405, { ok: false, error: "Method not allowed" });
+        const parsedUrl = new URL(req.url, "http://localhost");
+        const guildId = String(parsedUrl.searchParams.get("guildId") || "").trim();
+        if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Enter a valid Discord server ID." });
+        if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+        const guild = await client.guilds.fetch(guildId).catch(() => null);
+        if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server, or the server ID is invalid." });
+        const channels = await guild.channels.fetch().catch(() => null);
+        if (!channels) return sendJson(500, { ok: false, error: "Could not fetch channels for this server." });
+        const visible = channels.filter(ch => ch && ch.isTextBased() && ch.id && ch.name).map(ch => ({ id: ch.id, name: ch.name, type: ch.type === 0 ? "text" : ch.type === 5 ? "announcement" : ch.type === 15 ? "forum" : "text-based" })).sort((a, b) => a.name.localeCompare(b.name));
+        return sendJson(200, { ok: true, channels: visible });
+      }
+      if (pathname === "/api/discord-channel-lookup") {
+        if (req.method !== "POST") return sendJson(405, { ok: false, error: "Method not allowed" });
+        try {
+          const body = await readJsonBody(req, 5000);
+          const guildId = String(body.guildId || "").trim();
+          const channelId = String(body.channelId || "").trim();
+          if (!/^\d{17,20}$/.test(guildId) || !/^\d{17,20}$/.test(channelId)) return sendJson(400, { ok: false, error: "Enter valid Discord server and channel IDs (17–20 digits)." });
+          if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+          const guild = await client.guilds.fetch(guildId).catch(() => null);
+          if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
+          const channel = await guild.channels.fetch(channelId).catch(() => null);
+          if (!channel || !channel.isTextBased() || !channel.name) return sendJson(404, { ok: false, error: "That text channel was not found in the selected server." });
+          return sendJson(200, { ok: true, channel: { id: channel.id, name: channel.name, type: channel.type === 0 ? "text" : channel.type === 5 ? "announcement" : channel.type === 15 ? "forum" : "text-based" } });
+        } catch (err) { return sendJson(err.statusCode || 400, { ok: false, error: "Invalid channel lookup request." }); }
       }
       if (pathname === "/api/send-message") {
         if (req.method !== "POST") return sendJson(405, { ok: false, error: "Method not allowed" });
