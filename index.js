@@ -22,6 +22,8 @@ const {
 } = require("discord.js");
 
 const config = require("./config");
+// Optional environment variable: Discord role ID to assign while members are in voice.
+const VC_ROLE_ID = String(process.env.VC_ROLE_ID || "").trim();
 
 const specialWelcome = require("./special-welcome");
 
@@ -3539,6 +3541,24 @@ client.on(
 
       if (member?.user?.bot) {
         return;
+      }
+
+      // Auto VC role is configured only through the VC_ROLE_ID environment variable.
+      const configuredVcRoleId = VC_ROLE_ID;
+      if (configuredVcRoleId && member?.roles) {
+        try {
+          if (!oldState.channelId && newState.channelId) {
+            if (!member.roles.cache.has(configuredVcRoleId)) {
+              await member.roles.add(configuredVcRoleId, "Auto VC role: joined voice channel");
+            }
+          } else if (oldState.channelId && !newState.channelId) {
+            if (member.roles.cache.has(configuredVcRoleId)) {
+              await member.roles.remove(configuredVcRoleId, "Auto VC role: left voice channel");
+            }
+          }
+        } catch (roleErr) {
+          console.error("Auto VC role error:", roleErr.message);
+        }
       }
 
       const joined =
