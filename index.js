@@ -81,13 +81,6 @@ const DASHBOARD_CONFIG_FILE = path.join(__dirname, "dashboard-config.json");
 const DASHBOARD_COMMAND_FILE = path.join(__dirname, "dashboard-command-manager.json");
 const DASHBOARD_COMMAND_AUDIT_FILE = path.join(__dirname, "dashboard-command-audit.json");
 const DASHBOARD_COMMAND_ANALYTICS_FILE = path.join(__dirname, "dashboard-command-analytics.json");
-const DASHBOARD_ROLE_ALIASES_FILE = path.join(__dirname, "dashboard-role-command-aliases.json");
-let dashboardRoleCommandAliases = loadJson(DASHBOARD_ROLE_ALIASES_FILE, {});
-if (!dashboardRoleCommandAliases || typeof dashboardRoleCommandAliases !== "object" || Array.isArray(dashboardRoleCommandAliases)) dashboardRoleCommandAliases = {};
-function getRoleCommandAliases(guildId) {
-  const rows = dashboardRoleCommandAliases[guildId];
-  return Array.isArray(rows) ? rows.filter(x => x && typeof x.name === "string" && typeof x.roleId === "string") : [];
-}
 let dashboardConfig = loadJson(DASHBOARD_CONFIG_FILE, {});
 let dashboardCommandSettings = loadJson(DASHBOARD_COMMAND_FILE, {});
 let dashboardCommandAudit = loadJson(DASHBOARD_COMMAND_AUDIT_FILE, []);
@@ -357,7 +350,7 @@ function startHealthServer() {
     }
 
     // Shared dashboard configuration is stored by the bot process, not only in browser localStorage.
-    if (["/api/dashboard-config", "/api/command-manager", "/api/command-manager/audit", "/api/command-manager/analytics", "/api/command-manager/rollback", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup", "/api/discord-roles", "/api/discord-role", "/api/auto-roles", "/api/role-command-aliases"].includes(pathname)) {
+    if (["/api/dashboard-config", "/api/command-manager", "/api/command-manager/audit", "/api/command-manager/analytics", "/api/command-manager/rollback", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup", "/api/discord-roles", "/api/discord-role", "/api/auto-roles", "/api/special-welcome", "/api/mod-alerts", "/api/moderation-logs"].includes(pathname)) {
       setApiHeaders(res);
       if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
       const auth = String(req.headers.authorization || "");
@@ -368,6 +361,96 @@ function startHealthServer() {
         return;
       }
       const sendJson = (status, payload) => { res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); res.end(JSON.stringify(payload)); };
+      if (pathname === "/api/moderation-logs") {
+        const parsed = new URL(req.url, "http://localhost");
+        const guildId = String(parsed.searchParams.get("guildId") || "").trim();
+        if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Choose a valid Discord server." });
+        if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+        const guild = await client.guilds.fetch(guildId).catch(() => null);
+        if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
+        const keys = ["mod", "message", "voice", "channel", "role", "member"];
+        if (req.method === "GET") return sendJson(200, { ok: true, settings: Object.fromEntries(keys.map(k => [k, moderationLogConfig[guildId]?.[k] || ""])) });
+        if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
+        try {
+          const body = await readJsonBody(req, 5000); const incoming = body.settings && typeof body.settings === "object" ? body.settings : body;
+          const next = { ...(moderationLogConfig[guildId] || {}) };
+          for (const key of keys) {
+            if (incoming[key] === undefined) continue;
+            const id = String(incoming[key] || "");
+            if (id) {
+              if (!/^\d{17,20}$/.test(id)) return sendJson(400, { ok: false, error: `Choose a valid channel for ${key} logs.` });
+              const ch = await guild.channels.fetch(id).catch(() => null);
+              if (!ch || !ch.isTextBased() || !ch.send) return sendJson(400, { ok: false, error: `The ${key} log channel is not a usable text channel in this server.` });
+              const me = guild.members.me || await guild.members.fetchMe().catch(() => null); const perms = me && ch.permissionsFor(me);
+              if (!perms || !perms.has(PermissionFlagsBits.ViewChannel) || !perms.has(PermissionFlagsBits.SendMessages)) return sendJson(403, { ok: false, error: `LEADER needs View Channel and Send Messages for ${key} logs.` });
+            }
+            next[key] = id || null;
+          }
+          moderationLogConfig[guildId] = next; saveJson(MODLOG_CONFIG_FILE, moderationLogConfig);
+          return sendJson(200, { ok: true, settings: Object.fromEntries(keys.map(k => [k, next[k] || ""])), message: "Moderation log channels saved to the bot." });
+        } catch (err) { return sendJson(err.statusCode || 400, { ok: false, error: "Invalid moderation log settings." }); }
+      }
+      if (pathname === "/api/special-welcome") {
+        const parsed = new URL(req.url, "http://localhost");
+        const guildId = String(parsed.searchParams.get("guildId") || "").trim();
+        if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Choose a valid Discord server." });
+        if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+        const guild = await client.guilds.fetch(guildId).catch(() => null);
+        if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
+        if (req.method === "GET") return sendJson(200, { ok: true, config: specialWelcome.getConfig(guildId), templates: ["{user}", "{username}", "{server}", "{memberCount}", "{welcomer}", "{pronoun}"] });
+        if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
+        try {
+          const body = await readJsonBody(req, 6000);
+          const patch = body.config && typeof body.config === "object" ? body.config : body;
+          if (typeof patch.channelId === "string" && patch.channelId) {
+            if (!/^\d{17,20}$/.test(patch.channelId)) return sendJson(400, { ok: false, error: "Choose a valid text channel." });
+            const ch = await guild.channels.fetch(patch.channelId).catch(() => null);
+            if (!ch || !ch.isTextBased() || !ch.send) return sendJson(400, { ok: false, error: "The selected channel is not a usable text channel in this server." });
+            const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
+            const perms = me && ch.permissionsFor(me);
+            if (!perms || !perms.has(PermissionFlagsBits.ViewChannel) || !perms.has(PermissionFlagsBits.SendMessages)) return sendJson(403, { ok: false, error: "LEADER needs View Channel and Send Messages permissions in that channel." });
+          }
+          if (patch.joinTemplate !== undefined && (typeof patch.joinTemplate !== "string" || patch.joinTemplate.length > 1500)) return sendJson(400, { ok: false, error: "Join template must be text under 1500 characters." });
+          if (patch.welcomeTemplate !== undefined && (typeof patch.welcomeTemplate !== "string" || patch.welcomeTemplate.length > 1500)) return sendJson(400, { ok: false, error: "Welcome template must be text under 1500 characters." });
+          const config = specialWelcome.setConfig(guildId, patch);
+          return sendJson(200, { ok: true, config, message: "Special welcome settings saved to the bot." });
+        } catch (err) { return sendJson(err.statusCode || 400, { ok: false, error: "Invalid special welcome settings." }); }
+      }
+      if (pathname === "/api/mod-alerts") {
+        const parsed = new URL(req.url, "http://localhost");
+        const guildId = String(parsed.searchParams.get("guildId") || "").trim();
+        if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Choose a valid Discord server." });
+        if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+        const guild = await client.guilds.fetch(guildId).catch(() => null);
+        if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
+        const st = getModAlertState(guildId);
+        const expose = () => ({ channelId: st.channelId || "", alertTime: st.alertTime || "07:30", minVcSeconds: Number(st.minVcSeconds) || 10800, minChatMessages: Number(st.minChatMessages) || 300, vcRoleId: st.vcRoleId || "", chatRoleId: st.chatRoleId || "", lastAlertDate: st.lastAlertDate || null, timeZone: MOD_ALERT_TIME_ZONE });
+        if (req.method === "GET") return sendJson(200, { ok: true, config: expose() });
+        if (req.method === "POST") {
+          const body = await readJsonBody(req, 3000);
+          if (body.action !== "test") return sendJson(400, { ok: false, error: "Unknown action." });
+          const sent = await sendDailyModAlert(guild, true);
+          return sent ? sendJson(200, { ok: true, message: "Test moderator alert sent." }) : sendJson(400, { ok: false, error: "Set a valid alert channel and check LEADER's send/embed permissions first." });
+        }
+        if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
+        try {
+          const body = await readJsonBody(req, 5000); const input = body.config && typeof body.config === "object" ? body.config : body;
+          if (input.channelId !== undefined && input.channelId !== "") {
+            if (!/^\d{17,20}$/.test(String(input.channelId))) return sendJson(400, { ok: false, error: "Choose a valid alert channel." });
+            const ch = await guild.channels.fetch(String(input.channelId)).catch(() => null);
+            if (!ch || !ch.isTextBased() || !ch.send) return sendJson(400, { ok: false, error: "Alert channel not found in this server." });
+            const me = guild.members.me || await guild.members.fetchMe().catch(() => null); const perms = me && ch.permissionsFor(me);
+            if (!perms || !perms.has(PermissionFlagsBits.ViewChannel) || !perms.has(PermissionFlagsBits.SendMessages) || !perms.has(PermissionFlagsBits.EmbedLinks)) return sendJson(403, { ok: false, error: "LEADER needs View Channel, Send Messages and Embed Links in the alert channel." });
+            st.channelId = String(input.channelId);
+          } else if (input.channelId === "") st.channelId = null;
+          if (input.alertTime !== undefined) { const parsedTime = parseAlertTime(String(input.alertTime)); if (!parsedTime) return sendJson(400, { ok: false, error: "Use a valid alert time, e.g. 07:30 or 7:30am." }); st.alertTime = parsedTime; }
+          if (input.minVcSeconds !== undefined) { const n = Number(input.minVcSeconds); if (!Number.isInteger(n) || n < 60 || n > 86400) return sendJson(400, { ok: false, error: "VC requirement must be 60–86400 seconds." }); st.minVcSeconds = n; }
+          if (input.minChatMessages !== undefined) { const n = Number(input.minChatMessages); if (!Number.isInteger(n) || n < 1 || n > 100000) return sendJson(400, { ok: false, error: "Chat requirement must be 1–100000 messages." }); st.minChatMessages = n; }
+          for (const key of ["vcRoleId", "chatRoleId"]) if (input[key] !== undefined) { const id = String(input[key] || ""); if (id && !/^\d{17,20}$/.test(id)) return sendJson(400, { ok: false, error: "Choose a valid Discord role." }); if (id && !await guild.roles.fetch(id).catch(() => null)) return sendJson(400, { ok: false, error: "Selected role was not found in this server." }); st[key] = id || null; }
+          saveModAlertState();
+          return sendJson(200, { ok: true, config: expose(), message: "Moderator alert settings saved to the bot." });
+        } catch (err) { return sendJson(err.statusCode || 400, { ok: false, error: "Invalid moderator alert settings." }); }
+      }
       if (pathname === "/api/command-manager") {
         const parsedUrl = new URL(req.url, "http://localhost");
         const guildId = String(parsedUrl.searchParams.get("guildId") || "").trim();
@@ -462,47 +545,6 @@ function startHealthServer() {
           return sendJson(200, { ok: true, server: { id: guild.id, name: guild.name } });
         } catch (err) { return sendJson(err.statusCode || 400, { ok: false, error: "Invalid server lookup request." }); }
       }
-      if (pathname === "/api/role-command-aliases") {
-        if (!["GET", "PUT"].includes(req.method)) return sendJson(405, { ok: false, error: "Method not allowed" });
-        try {
-          let guildId, body;
-          if (req.method === "GET") guildId = String(new URL(req.url, "http://localhost").searchParams.get("guildId") || "").trim();
-          else { body = await readJsonBody(req, 16000); guildId = String(body.guildId || "").trim(); }
-          if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Choose a valid server first." });
-          if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
-          const guild = await client.guilds.fetch(guildId).catch(() => null);
-          if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
-          const roles = await guild.roles.fetch().catch(() => null);
-          if (!roles) return sendJson(500, { ok: false, error: "Could not load this server's roles." });
-          const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
-          const botTop = botMember ? botMember.roles.highest.position : -1;
-          if (req.method === "GET") {
-            return sendJson(200, { ok: true, aliases: getRoleCommandAliases(guildId), roles: [...roles.values()].sort((a,b) => b.position-a.position).map(r => ({ id:r.id, name:r.name, color:r.hexColor, managed:r.managed, assignable:!r.managed && r.id !== guild.id && r.position < botTop })) });
-          }
-          if (!Array.isArray(body.aliases) || body.aliases.length > 50) return sendJson(400, { ok: false, error: "Provide a list of up to 50 role shortcuts." });
-          const seen = new Set();
-          const reserved = new Set([...PREFIX_COMMAND_NAMES, "giveaway", "help", "role-command-aliases"]);
-          const next = [];
-          for (const item of body.aliases) {
-            const name = String(item?.name || "").trim().toLowerCase().replace(/^\?/, "");
-            const roleId = String(item?.roleId || "").trim();
-            if (!/^[a-z][a-z0-9_-]{1,31}$/.test(name)) return sendJson(400, { ok: false, error: `Shortcut "${name || "(empty)"}" must start with a letter and use 2–32 letters, numbers, hyphens or underscores.` });
-            if (reserved.has(name)) return sendJson(400, { ok: false, error: `?${name} is already used by a built-in command.` });
-            if (seen.has(name)) return sendJson(400, { ok: false, error: `The shortcut ?${name} is listed more than once.` });
-            seen.add(name);
-            const role = roles.get(roleId);
-            if (!role || role.managed || role.id === guild.id || role.position >= botTop) return sendJson(400, { ok: false, error: `Choose a role below LEADER's highest role for ?${name}.` });
-            next.push({ name, roleId: role.id });
-          }
-          dashboardRoleCommandAliases[guildId] = next;
-          saveJson(DASHBOARD_ROLE_ALIASES_FILE, dashboardRoleCommandAliases);
-          return sendJson(200, { ok: true, aliases: next, message: "Role shortcuts saved." });
-        } catch (err) {
-          console.error("Dashboard role-command alias error:", err);
-          return sendJson(err.statusCode || 400, { ok: false, error: "Could not save role shortcuts." });
-        }
-      }
-
       if (pathname === "/api/auto-roles") {
         if (!["GET", "PUT"].includes(req.method)) return sendJson(405, { ok: false, error: "Method not allowed" });
         if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
@@ -557,9 +599,7 @@ function startHealthServer() {
         if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
         const roles = await guild.roles.fetch().catch(() => null);
         if (!roles) return sendJson(500, { ok: false, error: "Could not fetch roles for this server." });
-        const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
-        const botTop = botMember ? botMember.roles.highest.position : -1;
-        return sendJson(200, { ok: true, guild: { id: guild.id, name: guild.name }, permissionOptions: Object.keys(PermissionFlagsBits).filter(k => !/^\d+$/.test(k)), roles: [...roles.values()].sort((a,b) => b.position-a.position).map(role => ({ id: role.id, name: role.name, color: role.hexColor, position: role.position, managed: role.managed, permissions: role.permissions.toArray(), editable: !role.managed && role.id !== guild.id && role.position < botTop, assignable: !role.managed && role.id !== guild.id && role.position < botTop })) });
+        return sendJson(200, { ok: true, guild: { id: guild.id, name: guild.name }, permissionOptions: Object.keys(PermissionFlagsBits).filter(k => !/^\d+$/.test(k)), roles: [...roles.values()].sort((a,b) => b.position-a.position).map(role => ({ id: role.id, name: role.name, color: role.hexColor, position: role.position, managed: role.managed, permissions: role.permissions.toArray(), editable: !role.managed && role.id !== guild.id })) });
       }
       if (pathname === "/api/discord-role") {
         if (!["PUT", "POST", "DELETE"].includes(req.method)) return sendJson(405, { ok: false, error: "Method not allowed" });
@@ -2003,11 +2043,9 @@ client.on(
     // Enforce Command Manager policies before any prefix-command handler runs.
     if (lowerContent.startsWith("?")) {
       const prefixName = lowerContent.split(/\s+/)[0].slice(1).replace(/[^a-z0-9_-]/g, "");
-      const configuredRoleAlias = getRoleCommandAliases(message.guild.id).find(item => item.name === prefixName);
-      const policyName = configuredRoleAlias ? "giverole" : prefixName;
-      if (prefixName && (configuredRoleAlias || PREFIX_COMMAND_NAMES.includes(prefixName) || Object.prototype.hasOwnProperty.call(dashboardCommandSettings, prefixName))) {
-        const access = checkCommandAccess(policyName, message.member, message.author.id, null, message.guild.id, message.channel.id);
-        recordCommandEvent(message.guild.id, policyName, access.allowed ? "allowed" : "blocked", access.reason || "");
+      if (prefixName && (PREFIX_COMMAND_NAMES.includes(prefixName) || Object.prototype.hasOwnProperty.call(dashboardCommandSettings, prefixName))) {
+        const access = checkCommandAccess(prefixName, message.member, message.author.id, null, message.guild.id, message.channel.id);
+        recordCommandEvent(message.guild.id, prefixName, access.allowed ? "allowed" : "blocked", access.reason || "");
         if (!access.allowed) {
           const denial = formatCommandDenial(access.policy?.denialMessage, `?${prefixName}`, message.author);
           await message.reply({ content: denial, allowedMentions: { users: [message.author.id] } }).catch(() => {});
@@ -2822,25 +2860,6 @@ client.on(
     /* =========================
        ROLE COMMANDS
     ========================= */
-
-    // Website-configured role shortcuts: ?shortcut @member assigns its saved role.
-    const roleShortcutName = lowerContent.split(/\s+/)[0].replace(/^\?/, "");
-    const roleShortcut = getRoleCommandAliases(message.guild.id).find(item => item.name === roleShortcutName);
-    if (roleShortcut) {
-      if (!message.member.permissions.has(PermissionFlagsBits.ManageRoles)) return message.reply("❌ You don't have permission to manage roles.");
-      const target = message.mentions.members.first();
-      if (!target) return message.reply(`❌ Please mention the member. Use \`?${roleShortcut.name} @member\`.`);
-      const role = message.guild.roles.cache.get(roleShortcut.roleId) || await message.guild.roles.fetch(roleShortcut.roleId).catch(() => null);
-      if (!role) return message.reply("❌ The role saved for this shortcut no longer exists. Update it in the LEADER website.");
-      if (role.managed || role.id === message.guild.id || role.position >= message.guild.members.me.roles.highest.position) return message.reply("❌ LEADER cannot assign this role. Check its role position and permissions.");
-      try {
-        await target.roles.add(role, `Role shortcut ?${roleShortcut.name} used by ${message.author.tag}`);
-        return message.channel.send({ content: `✅ Added **${role.name}** to ${target}.`, allowedMentions: { users: [target.id] } });
-      } catch (err) {
-        console.error(`Role shortcut ?${roleShortcut.name} failed:`, err);
-        return message.reply("❌ I couldn't assign that role. Check LEADER's role position and permissions.");
-      }
-    }
 
     if (lowerContent.startsWith("?giverole")) {
       if (!message.member.permissions.has(PermissionFlagsBits.ManageRoles)) {

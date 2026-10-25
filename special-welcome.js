@@ -36,14 +36,39 @@ function saveConfig(config) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
 }
 
-function getChannelId(guildId) {
-  return loadConfig()[guildId]?.channelId || null;
+function getConfig(guildId) {
+  const raw = loadConfig()[guildId] || {};
+  return {
+    channelId: raw.channelId || null,
+    enabled: raw.enabled !== false,
+    joinTemplate: typeof raw.joinTemplate === 'string' ? raw.joinTemplate : '🎉 **A NEW MEMBER JUST JOINED THE SERVER!**\nYou can welcome **{pronoun}** using `?w`',
+    welcomeTemplate: typeof raw.welcomeTemplate === 'string' ? raw.welcomeTemplate : '{member} WELCOME FROM {welcomer} FOR JOINING US LET\'S DO FUN TOGETHER'
+  };
 }
 
-function setChannelId(guildId, channelId) {
+function getChannelId(guildId) { return getConfig(guildId).channelId; }
+
+function setConfig(guildId, patch = {}) {
   const config = loadConfig();
-  config[guildId] = { channelId };
+  const current = config[guildId] && typeof config[guildId] === 'object' ? config[guildId] : {};
+  config[guildId] = {
+    ...current,
+    ...(typeof patch.channelId === 'string' || patch.channelId === null ? { channelId: patch.channelId } : {}),
+    ...(typeof patch.enabled === 'boolean' ? { enabled: patch.enabled } : {}),
+    ...(typeof patch.joinTemplate === 'string' ? { joinTemplate: patch.joinTemplate.slice(0, 1500) } : {}),
+    ...(typeof patch.welcomeTemplate === 'string' ? { welcomeTemplate: patch.welcomeTemplate.slice(0, 1500) } : {})
+  };
   saveConfig(config);
+  return getConfig(guildId);
+}
+
+function setChannelId(guildId, channelId) { return setConfig(guildId, { channelId }); }
+
+function renderTemplate(template, values) {
+  return String(template || '').replace(/\{(user|member|username|server|memberCount|welcomer|pronoun)\}/gi, (match, key) => {
+    const value = values[key] ?? values[key.toLowerCase()] ?? match;
+    return String(value);
+  });
 }
 
 function fitFont(ctx, text, maxWidth, startSize, minSize = 16, weight = 700) {
@@ -194,15 +219,16 @@ function getGender(member) {
 async function notifyNewMember(member) {
   if (!member?.guild || member.user?.bot) return false;
 
-  const channelId = getChannelId(member.guild.id);
-  if (!channelId) return false;
+  const cfg = getConfig(member.guild.id);
+  const channelId = cfg.channelId;
+  if (!cfg.enabled || !channelId) return false;
 
   const channel = await member.guild.channels.fetch(channelId).catch(() => null);
   if (!channel?.isTextBased()) return false;
 
   const gender = getGender(member);
   const pronoun = gender === 'male' ? 'HIM' : gender === 'female' ? 'HER' : 'THEM';
-  const line = `🎉 **A NEW MEMBER JUST JOINED THE SERVER!**\nYou can welcome **${pronoun}** using \`?w\``;
+  const line = renderTemplate(cfg.joinTemplate, { user: `${member}`, member: `${member}`, username: member.user.username, server: member.guild.name, memberCount: member.guild.memberCount, welcomer: '', pronoun });
 
   await channel.send({ content: line }).catch(err => {
     console.error('Special welcome join notification error:', err);
@@ -261,7 +287,8 @@ async function handleMessage(message) {
     try {
       const image = await renderWelcome(message.member, newMember);
       const attachment = new AttachmentBuilder(image, { name: 'leader-welcome.png' });
-      const text = `${newMember} WELCOME FROM ${message.member} FOR JOINING US LET'S DO FUN TOGETHER`;
+      const cfg = getConfig(message.guild.id);
+      const text = renderTemplate(cfg.welcomeTemplate, { user: `${newMember}`, member: `${newMember}`, username: newMember.user.username, server: message.guild.name, memberCount: message.guild.memberCount, welcomer: `${message.member}`, pronoun: getGender(newMember) || 'them' });
       await message.channel.send({ content: text, files: [attachment] });
     } catch (err) {
       console.error('Special welcome render error:', err);
@@ -278,6 +305,8 @@ module.exports = {
   notifyNewMember,
   getGender,
   getChannelId,
+  getConfig,
+  setConfig,
   setChannelId
 };
 
