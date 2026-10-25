@@ -15,7 +15,7 @@ This update replaces the old prototype-style dashboard with a mobile-responsive 
 - Moderator Alerts: alert channel, India-time schedule, minimum VC seconds, minimum chat messages, VC moderator role, chat moderator role and test alert.
 - Moderation Logs: separate destinations for moderation, message, voice, channel, role and member events.
 - Auto Roles: load assignable roles and save the list used by the bot for new members.
-- Roles & Permissions: create/edit/delete roles, with Discord role-hierarchy protections; permission edits use a limited allowlist in the UI.
+- Roles & Permissions: create/edit/delete roles, edit role name and color, and toggle all permission flags exposed by the installed Discord.js version (50+ where available). Each permission has a plain-language label and explanation, grouped by category, with search, visible enable/disable controls, an Administrator warning, and a real save to Discord. Role hierarchy, managed roles, @everyone and Manage Roles requirements are enforced by the bot API.
 - Command Settings: list implemented prefix commands, enable/disable and configure supported policy restrictions.
 - Anti-spam: live threshold/window/action/exemptions settings.
 - Message Studio: send a plain message or embed to a selected text channel.
@@ -35,7 +35,7 @@ The special welcome template image can be customized using a direct HTTPS image 
 
 ## Important limitations and operational notes
 
-- Static syntax checks passed for `index.js`, `special-welcome.js`, and the dashboard JavaScript. The latest UI repair also passed a JavaScript syntax check. This is not a live Discord/Render integration test; the bot must be deployed and tested against your server.
+- Static syntax checks passed for `index.js`, `special-welcome.js`, and the dashboard JavaScript. The role-editor update passed JavaScript syntax checks. This is not a live Discord/Render integration test; the bot must be deployed and tested against your server.
 - JSON settings such as `special-welcome-config.json`, `moderator-alerts.json`, `moderation-logs.json`, `autoroles.json`, and dashboard settings are stored on the service filesystem, consistent with the existing bot. Render free services generally have ephemeral filesystems; settings written locally may be lost when the service is replaced/redeployed. Use a persistent disk where supported or move these settings to durable storage before relying on them for production.
 - The dashboard uses a private shared API key for this local/private workflow. Do not publish the HTML with a real key embedded in it. A publicly hosted dashboard should use Discord OAuth and server-side sessions.
 - The website exposes implemented bot features only; it does not add giveaways, fake workflow builders, fake ticket controls, or a simulated historical log viewer.

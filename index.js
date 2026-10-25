@@ -606,7 +606,10 @@ function startHealthServer() {
         if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
         const roles = await guild.roles.fetch().catch(() => null);
         if (!roles) return sendJson(500, { ok: false, error: "Could not fetch roles for this server." });
-        return sendJson(200, { ok: true, guild: { id: guild.id, name: guild.name }, permissionOptions: Object.keys(PermissionFlagsBits).filter(k => !/^\d+$/.test(k)), roles: [...roles.values()].sort((a,b) => b.position-a.position).map(role => ({ id: role.id, name: role.name, color: role.hexColor, position: role.position, managed: role.managed, permissions: role.permissions.toArray(), editable: !role.managed && role.id !== guild.id })) });
+        const botMember = await guild.members.fetchMe().catch(() => null);
+        const botHighestPosition = botMember?.roles?.highest?.position ?? -1;
+        const editableRole = role => !!botMember?.permissions.has(PermissionFlagsBits.ManageRoles) && !role.managed && role.id !== guild.id && role.position < botHighestPosition;
+        return sendJson(200, { ok: true, guild: { id: guild.id, name: guild.name }, permissionOptions: [...new Set(Object.keys(PermissionFlagsBits).filter(k => !/^\d+$/.test(k)))], roles: [...roles.values()].sort((a,b) => b.position-a.position).map(role => ({ id: role.id, name: role.name, color: role.hexColor, position: role.position, managed: role.managed, permissions: role.permissions.toArray(), editable: editableRole(role) })) });
       }
       if (pathname === "/api/discord-role") {
         if (!["PUT", "POST", "DELETE"].includes(req.method)) return sendJson(405, { ok: false, error: "Method not allowed" });
