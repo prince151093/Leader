@@ -890,6 +890,47 @@ const client = new Client({
   ]
 });
 
+
+/* =========================
+   ENVIRONMENT-BASED VC ROLE
+   Set VC_ROLE_ID in the hosting environment.
+========================= */
+const VC_ROLE_ID = String(process.env.VC_ROLE_ID || "").trim();
+
+client.on("voiceStateUpdate", async (oldState, newState) => {
+  try {
+    if (!VC_ROLE_ID) return; // Feature disabled until VC_ROLE_ID is configured.
+    const member = newState.member || oldState.member;
+    if (!member || member.user?.bot) return;
+
+    const joinedVoice = !oldState.channelId && Boolean(newState.channelId);
+    const leftVoice = Boolean(oldState.channelId) && !newState.channelId;
+    if (!joinedVoice && !leftVoice) return; // Do not change role when moving between voice channels.
+
+    const role = await newState.guild.roles.fetch(VC_ROLE_ID).catch(() => null);
+    if (!role) {
+      console.warn(`[VC ROLE] Role ${VC_ROLE_ID} was not found in guild ${newState.guild.id}. Check VC_ROLE_ID.`);
+      return;
+    }
+    const botMember = newState.guild.members.me || await newState.guild.members.fetchMe().catch(() => null);
+    if (!botMember || !botMember.permissions.has(PermissionFlagsBits.ManageRoles) ||
+        role.position >= botMember.roles.highest.position || role.managed) {
+      console.warn(`[VC ROLE] Missing Manage Roles permission or VC role is not below the bot's highest role in guild ${newState.guild.id}.`);
+      return;
+    }
+
+    if (joinedVoice && !member.roles.cache.has(role.id)) {
+      await member.roles.add(role, "Automatic voice-channel role (VC_ROLE_ID)");
+      console.log(`[VC ROLE] Assigned ${role.id} to ${member.id} on voice join.`);
+    } else if (leftVoice && member.roles.cache.has(role.id)) {
+      await member.roles.remove(role, "Automatic voice-channel role removed on voice leave (VC_ROLE_ID)");
+      console.log(`[VC ROLE] Removed ${role.id} from ${member.id} on voice leave.`);
+    }
+  } catch (err) {
+    console.error("[VC ROLE] Failed to update voice role:", err?.message || err);
+  }
+});
+
 /* =========================
    DISCORD DIAGNOSTICS
 ========================= */
