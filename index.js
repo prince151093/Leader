@@ -627,6 +627,7 @@ function startHealthServer() {
           for (const item of body.aliases) {
             const name = String(item?.name || "").trim().toLowerCase().replace(/^\?/, "");
             const roleId = String(item?.roleId || "").trim();
+            const action = item?.action === "remove" ? "remove" : "give";
             if (!/^[a-z][a-z0-9_-]{1,31}$/.test(name)) return sendJson(400, { ok: false, error: `Invalid shortcut name: ${name || "(empty)"}.` });
             if (reserved.has(name) || name === "role-command-aliases") return sendJson(400, { ok: false, error: `?${name} conflicts with a built-in command.` });
             if (names.has(name)) return sendJson(400, { ok: false, error: `Duplicate shortcut: ?${name}.` });
@@ -635,7 +636,7 @@ function startHealthServer() {
             const role = await guild.roles.fetch(roleId).catch(() => null);
             if (!role) return sendJson(400, { ok: false, error: `Role for ?${name} was not found.` });
             if (role.managed || role.id === guild.id || role.position >= (botMember.roles.highest?.position ?? -1)) return sendJson(403, { ok: false, error: `LEADER cannot assign the role “${role.name}”. Check role hierarchy.` });
-            aliases.push({ name, roleId });
+            aliases.push({ name, roleId, action });
           }
           dashboardRoleAliases[requestedGuildId] = aliases;
           saveJson(DASHBOARD_ROLE_ALIASES_FILE, dashboardRoleAliases);
@@ -2148,8 +2149,20 @@ client.on(
         const role = await message.guild.roles.fetch(shortcut.roleId).catch(() => null);
         const botMember = message.guild.members.me || await message.guild.members.fetchMe().catch(() => null);
         if (!role || role.managed || role.id === message.guild.id || !botMember || role.position >= botMember.roles.highest.position) return message.reply("❌ This shortcut's role is missing or cannot be assigned. Update it in the dashboard.");
-        try { await target.roles.add(role, `Role shortcut ?${shortcutName} used by ${message.author.tag}`); return message.reply(`✅ Added **${role.name}** to ${target}.`); }
-        catch (err) { console.error("Role shortcut assignment failed:", err); return message.reply("❌ Could not assign that role. Check LEADER's role hierarchy and permissions."); }
+        if (target.id !== message.author.id && message.member.roles.highest.position <= target.roles.highest.position && message.guild.ownerId !== message.author.id) return message.reply("❌ You cannot manage a member whose highest role is equal to or higher than yours.");
+        try {
+          if (shortcut.action === "remove") {
+            if (!target.roles.cache.has(role.id)) return message.reply(`ℹ️ ${target} does not have the **${role.name}** role.`);
+            await target.roles.remove(role, `Role shortcut ?${shortcutName} used by ${message.author.tag}`);
+            return message.reply(`✅ Removed **${role.name}** from ${target}.`);
+          }
+          if (target.roles.cache.has(role.id)) return message.reply(`ℹ️ ${target} already has the **${role.name}** role.`);
+          await target.roles.add(role, `Role shortcut ?${shortcutName} used by ${message.author.tag}`);
+          return message.reply(`✅ Added **${role.name}** to ${target}.`);
+        } catch (err) {
+          console.error(`Role shortcut ?${shortcutName} failed:`, err);
+          return message.reply(`❌ Could not ${shortcut.action === "remove" ? "remove" : "assign"} that role. Check LEADER's role hierarchy and permissions.`);
+        }
       }
     }
 
