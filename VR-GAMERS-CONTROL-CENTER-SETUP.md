@@ -11,7 +11,7 @@ This update replaces the old prototype-style dashboard with a mobile-responsive 
 ## Dashboard features connected to bot APIs
 
 - Overview and real server statistics.
-- Special Welcome: channel, enabled/disabled state, join notification template and `?w` banner text template.
+- Special Welcome: channel, enabled/disabled state, join notification template, `?w` banner text template, and custom banner background image via a direct HTTPS image URL (PNG/JPG/WEBP, max 8 MB). Leave the URL blank to use the bundled default template.
 - Moderator Alerts: alert channel, India-time schedule, minimum VC seconds, minimum chat messages, VC moderator role, chat moderator role and test alert.
 - Moderation Logs: separate destinations for moderation, message, voice, channel, role and member events.
 - Auto Roles: load assignable roles and save the list used by the bot for new members.
@@ -31,7 +31,7 @@ This update replaces the old prototype-style dashboard with a mobile-responsive 
 
 ## Template variables
 
-The special welcome templates support `{user}`, `{member}`, `{username}`, `{server}`, `{memberCount}`, `{welcomer}`, and `{pronoun}`. The bot replaces these when it sends the relevant message. Preview text in the dashboard uses sample values only.
+The special welcome template image can be customized using a direct HTTPS image URL. The bot downloads and renders that image when generating the banner; the original built-in template is used when the URL is blank. The special welcome templates support `{user}`, `{member}`, `{username}`, `{server}`, `{memberCount}`, `{welcomer}`, and `{pronoun}`. The bot replaces these when it sends the relevant message. Preview text in the dashboard uses sample values only.
 
 ## Important limitations and operational notes
 

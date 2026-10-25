@@ -42,7 +42,8 @@ function getConfig(guildId) {
     channelId: raw.channelId || null,
     enabled: raw.enabled !== false,
     joinTemplate: typeof raw.joinTemplate === 'string' ? raw.joinTemplate : '🎉 **A NEW MEMBER JUST JOINED THE SERVER!**\nYou can welcome **{pronoun}** using `?w`',
-    welcomeTemplate: typeof raw.welcomeTemplate === 'string' ? raw.welcomeTemplate : '{member} WELCOME FROM {welcomer} FOR JOINING US LET\'S DO FUN TOGETHER'
+    welcomeTemplate: typeof raw.welcomeTemplate === 'string' ? raw.welcomeTemplate : '{member} WELCOME FROM {welcomer} FOR JOINING US LET\'S DO FUN TOGETHER',
+    templateImageUrl: typeof raw.templateImageUrl === 'string' ? raw.templateImageUrl : ''
   };
 }
 
@@ -56,7 +57,8 @@ function setConfig(guildId, patch = {}) {
     ...(typeof patch.channelId === 'string' || patch.channelId === null ? { channelId: patch.channelId } : {}),
     ...(typeof patch.enabled === 'boolean' ? { enabled: patch.enabled } : {}),
     ...(typeof patch.joinTemplate === 'string' ? { joinTemplate: patch.joinTemplate.slice(0, 1500) } : {}),
-    ...(typeof patch.welcomeTemplate === 'string' ? { welcomeTemplate: patch.welcomeTemplate.slice(0, 1500) } : {})
+    ...(typeof patch.welcomeTemplate === 'string' ? { welcomeTemplate: patch.welcomeTemplate.slice(0, 1500) } : {}),
+    ...(typeof patch.templateImageUrl === 'string' ? { templateImageUrl: patch.templateImageUrl.trim().slice(0, 1000) } : {})
   };
   saveConfig(config);
   return getConfig(guildId);
@@ -160,11 +162,22 @@ function drawName(ctx, text, box, align) {
 }
 
 async function renderWelcome(commandUser, newMember) {
-  if (!fs.existsSync(TEMPLATE_FILE)) {
-    throw new Error(`Missing special welcome template: ${TEMPLATE_FILE}`);
+  const cfg = getConfig(newMember.guild.id);
+  let template;
+  if (cfg.templateImageUrl) {
+    const url = new URL(cfg.templateImageUrl);
+    if (url.protocol !== 'https:') throw new Error('Special welcome template image must use HTTPS.');
+    const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (!response.ok) throw new Error(`Template image download failed: ${response.status}`);
+    const type = String(response.headers.get('content-type') || '').toLowerCase();
+    if (!type.startsWith('image/')) throw new Error('Template image URL must return an image.');
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length > 8 * 1024 * 1024) throw new Error('Template image must be 8 MB or smaller.');
+    template = await loadImage(bytes);
+  } else {
+    if (!fs.existsSync(TEMPLATE_FILE)) throw new Error(`Missing special welcome template: ${TEMPLATE_FILE}`);
+    template = await loadImage(TEMPLATE_FILE);
   }
-
-  const template = await loadImage(TEMPLATE_FILE);
   const canvas = createCanvas(template.width, template.height);
   const ctx = canvas.getContext('2d');
   ctx.drawImage(template, 0, 0, template.width, template.height);

@@ -412,6 +412,13 @@ function startHealthServer() {
           }
           if (patch.joinTemplate !== undefined && (typeof patch.joinTemplate !== "string" || patch.joinTemplate.length > 1500)) return sendJson(400, { ok: false, error: "Join template must be text under 1500 characters." });
           if (patch.welcomeTemplate !== undefined && (typeof patch.welcomeTemplate !== "string" || patch.welcomeTemplate.length > 1500)) return sendJson(400, { ok: false, error: "Welcome template must be text under 1500 characters." });
+          if (patch.templateImageUrl !== undefined) {
+            if (typeof patch.templateImageUrl !== "string" || patch.templateImageUrl.length > 1000) return sendJson(400, { ok: false, error: "Template image URL must be text under 1000 characters." });
+            if (patch.templateImageUrl.trim()) {
+              let imageUrl; try { imageUrl = new URL(patch.templateImageUrl.trim()); } catch { return sendJson(400, { ok: false, error: "Enter a valid HTTPS image URL." }); }
+              if (imageUrl.protocol !== "https:") return sendJson(400, { ok: false, error: "Template image URL must use HTTPS." });
+            }
+          }
           const config = specialWelcome.setConfig(guildId, patch);
           return sendJson(200, { ok: true, config, message: "Special welcome settings saved to the bot." });
         } catch (err) { return sendJson(err.statusCode || 400, { ok: false, error: "Invalid special welcome settings." }); }
