@@ -81,6 +81,9 @@ const DASHBOARD_CONFIG_FILE = path.join(__dirname, "dashboard-config.json");
 const DASHBOARD_COMMAND_FILE = path.join(__dirname, "dashboard-command-manager.json");
 const DASHBOARD_COMMAND_AUDIT_FILE = path.join(__dirname, "dashboard-command-audit.json");
 const DASHBOARD_COMMAND_ANALYTICS_FILE = path.join(__dirname, "dashboard-command-analytics.json");
+const DASHBOARD_ROLE_ALIASES_FILE = path.join(__dirname, "dashboard-role-command-aliases.json");
+let dashboardRoleAliases = loadJson(DASHBOARD_ROLE_ALIASES_FILE, {});
+if (!dashboardRoleAliases || typeof dashboardRoleAliases !== "object" || Array.isArray(dashboardRoleAliases)) dashboardRoleAliases = {};
 let dashboardConfig = loadJson(DASHBOARD_CONFIG_FILE, {});
 let dashboardCommandSettings = loadJson(DASHBOARD_COMMAND_FILE, {});
 let dashboardCommandAudit = loadJson(DASHBOARD_COMMAND_AUDIT_FILE, []);
@@ -350,7 +353,7 @@ function startHealthServer() {
     }
 
     // Shared dashboard configuration is stored by the bot process, not only in browser localStorage.
-    if (["/api/dashboard-config", "/api/command-manager", "/api/command-manager/audit", "/api/command-manager/analytics", "/api/command-manager/rollback", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup", "/api/discord-roles", "/api/discord-role", "/api/auto-roles", "/api/special-welcome", "/api/mod-alerts", "/api/moderation-logs"].includes(pathname)) {
+    if (["/api/dashboard-config", "/api/command-manager", "/api/command-manager/audit", "/api/command-manager/analytics", "/api/command-manager/rollback", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup", "/api/discord-roles", "/api/discord-role", "/api/auto-roles", "/api/role-command-aliases", "/api/special-welcome", "/api/mod-alerts", "/api/moderation-logs"].includes(pathname)) {
       setApiHeaders(res);
       if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
       const auth = String(req.headers.authorization || "");
@@ -594,6 +597,52 @@ function startHealthServer() {
         } catch (err) {
           console.error("[DASHBOARD API] auto-roles failed:", err);
           return sendJson(err.statusCode || 500, { ok: false, error: "Auto roles request failed." });
+        }
+      }
+      if (pathname === "/api/role-command-aliases") {
+        const parsedUrl = new URL(req.url, "http://localhost");
+        const guildId = String((req.method === "GET" ? parsedUrl.searchParams.get("guildId") : "") || "").trim();
+        if (req.method === "GET") {
+          const requestedGuildId = guildId;
+          if (!/^\d{17,20}$/.test(requestedGuildId)) return sendJson(400, { ok: false, error: "Select a valid Discord server first." });
+          if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+          const guild = await client.guilds.fetch(requestedGuildId).catch(() => null);
+          if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
+          return sendJson(200, { ok: true, aliases: Array.isArray(dashboardRoleAliases[requestedGuildId]) ? dashboardRoleAliases[requestedGuildId] : [] });
+        }
+        if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
+        try {
+          const body = await readJsonBody(req, 12000);
+          const requestedGuildId = String(body.guildId || "").trim();
+          if (!/^\d{17,20}$/.test(requestedGuildId)) return sendJson(400, { ok: false, error: "Select a valid Discord server." });
+          if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+          const guild = await client.guilds.fetch(requestedGuildId).catch(() => null);
+          if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
+          const botMember = await guild.members.fetchMe().catch(() => null);
+          if (!botMember?.permissions.has(PermissionFlagsBits.ManageRoles)) return sendJson(403, { ok: false, error: "LEADER needs Manage Roles permission to assign roles." });
+          if (!Array.isArray(body.aliases) || body.aliases.length > 100) return sendJson(400, { ok: false, error: "Aliases must be a list of at most 100 shortcuts." });
+          const names = new Set();
+          const aliases = [];
+          const reserved = new Set(PREFIX_COMMAND_NAMES);
+          for (const item of body.aliases) {
+            const name = String(item?.name || "").trim().toLowerCase().replace(/^\?/, "");
+            const roleId = String(item?.roleId || "").trim();
+            if (!/^[a-z][a-z0-9_-]{1,31}$/.test(name)) return sendJson(400, { ok: false, error: `Invalid shortcut name: ${name || "(empty)"}.` });
+            if (reserved.has(name) || name === "role-command-aliases") return sendJson(400, { ok: false, error: `?${name} conflicts with a built-in command.` });
+            if (names.has(name)) return sendJson(400, { ok: false, error: `Duplicate shortcut: ?${name}.` });
+            names.add(name);
+            if (!/^\d{17,20}$/.test(roleId)) return sendJson(400, { ok: false, error: `Choose a valid role for ?${name}.` });
+            const role = await guild.roles.fetch(roleId).catch(() => null);
+            if (!role) return sendJson(400, { ok: false, error: `Role for ?${name} was not found.` });
+            if (role.managed || role.id === guild.id || role.position >= (botMember.roles.highest?.position ?? -1)) return sendJson(403, { ok: false, error: `LEADER cannot assign the role “${role.name}”. Check role hierarchy.` });
+            aliases.push({ name, roleId });
+          }
+          dashboardRoleAliases[requestedGuildId] = aliases;
+          saveJson(DASHBOARD_ROLE_ALIASES_FILE, dashboardRoleAliases);
+          return sendJson(200, { ok: true, aliases, message: "Role shortcuts saved to the bot." });
+        } catch (err) {
+          console.error("[DASHBOARD API] role-command-aliases failed:", err);
+          return sendJson(500, { ok: false, error: "Could not save role shortcuts. Check bot logs and role permissions." });
         }
       }
       if (pathname === "/api/discord-roles") {
@@ -2061,6 +2110,24 @@ client.on(
           await message.reply({ content: denial, allowedMentions: { users: [message.author.id] } }).catch(() => {});
           return;
         }
+      }
+    }
+
+    // Configurable role shortcuts (for example ?member @user) saved by the dashboard.
+    if (message.guild && lowerContent.startsWith("?")) {
+      const shortcutName = lowerContent.split(/\s+/)[0].slice(1).replace(/[^a-z0-9_-]/g, "");
+      const shortcut = (Array.isArray(dashboardRoleAliases[message.guild.id]) ? dashboardRoleAliases[message.guild.id] : []).find(a => a.name === shortcutName);
+      if (shortcut) {
+        const access = checkCommandAccess("giverole", message.member, message.author.id, null, message.guild.id, message.channel.id);
+        if (!access.allowed) return message.reply({ content: formatCommandDenial(access.policy?.denialMessage, `?${shortcutName}`, message.author), allowedMentions: { users: [message.author.id] } }).catch(() => {});
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageRoles)) return message.reply("❌ You need Manage Roles permission to use this shortcut.");
+        const target = message.mentions.members.first();
+        if (!target) return message.reply(`❌ Usage: ?${shortcutName} @user`);
+        const role = await message.guild.roles.fetch(shortcut.roleId).catch(() => null);
+        const botMember = message.guild.members.me || await message.guild.members.fetchMe().catch(() => null);
+        if (!role || role.managed || role.id === message.guild.id || !botMember || role.position >= botMember.roles.highest.position) return message.reply("❌ This shortcut's role is missing or cannot be assigned. Update it in the dashboard.");
+        try { await target.roles.add(role, `Role shortcut ?${shortcutName} used by ${message.author.tag}`); return message.reply(`✅ Added **${role.name}** to ${target}.`); }
+        catch (err) { console.error("Role shortcut assignment failed:", err); return message.reply("❌ Could not assign that role. Check LEADER's role hierarchy and permissions."); }
       }
     }
 
