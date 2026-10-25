@@ -93,7 +93,7 @@ if (!dashboardCommandAnalytics || typeof dashboardCommandAnalytics !== "object" 
 // Migrate the older boolean format while retaining existing root-level policies as global defaults.
 if (typeof dashboardCommandSettings.giveaway === "boolean") dashboardCommandSettings.giveaway = { enabled: dashboardCommandSettings.giveaway };
 const PREFIX_COMMAND_NAMES = [
-  "activity", "addinsta", "afk", "autoroles", "ban", "channellog", "clear", "clearautoroles", "commands", "giverole", "insta", "kick", "listas", "lock", "memberlog", "messagelog", "modalertstatus", "modalerttest", "modpdf", "modlogs", "mute", "progress", "purge", "removeas", "removeautorole", "removeinsta", "removemedia", "removerole", "resetalert", "rolelog", "setalerttime", "setas", "setasprogressviewchannel", "setautorole", "setchannellog", "setchatmod", "setdailyreportrole", "setmainchannel", "setmedia", "setmemberlog", "setmessagelog", "setminreqchat", "setminreqvc", "setmodalert", "setmodlogs", "setnick", "setrolelog", "setvcmod", "setvoicelog", "slowmode", "timeout", "unban", "unlock", "unmute", "untimeout", "unwarn", "voicelog", "warn", "warns", "w", "setspecialwelcomechannel"
+  "activity", "addinsta", "afk", "autoroles", "ban", "channellog", "clear", "clearautoroles", "commands", "giverole", "insta", "kick", "listas", "lock", "memberlog", "messagelog", "modalertstatus", "modalerttest", "modpdf", "modlogs", "mute", "progress", "purge", "removeas", "removeautorole", "removeinsta", "removemedia", "removerole", "resetalert", "rolelog", "setalerttime", "setas", "setasprogressviewchannel", "setautorole", "setchannellog", "setchatmod", "setdailyreportrole", "setmainchannel", "setmedia", "setmemberlog", "setmessagelog", "setminreqchat", "setminreqvc", "setmodalert", "setmodlogs", "setnick", "setrolelog", "setvcmod", "setvoicelog", "slowmode", "timeout", "unban", "undeveloper", "unlock", "unmute", "untimeout", "unwarn", "voicelog", "warn", "warns", "w", "setspecialwelcomechannel"
 ];
 const COMMAND_DEFAULT_DENIAL = "{user}, you don't have permission to use `{command}`.";
 const commandCooldowns = new Map();
@@ -2110,6 +2110,28 @@ client.on(
           await message.reply({ content: denial, allowedMentions: { users: [message.author.id] } }).catch(() => {});
           return;
         }
+      }
+    }
+
+    // Built-in shortcut: ?undeveloper @user removes the Developer role.
+    if (message.guild && lowerContent.split(/\s+/)[0] === "?undeveloper") {
+      const access = checkCommandAccess("giverole", message.member, message.author.id, null, message.guild.id, message.channel.id);
+      if (!access.allowed) return message.reply({ content: formatCommandDenial(access.policy?.denialMessage, "?undeveloper", message.author), allowedMentions: { users: [message.author.id] } }).catch(() => {});
+      if (!message.member.permissions.has(PermissionFlagsBits.ManageRoles)) return message.reply("❌ You need Manage Roles permission to use this shortcut.");
+      const target = message.mentions.members.first();
+      if (!target) return message.reply("❌ Usage: ?undeveloper @user");
+      const role = message.guild.roles.cache.find(r => r.name.toLocaleLowerCase() === "developer");
+      const botMember = message.guild.members.me || await message.guild.members.fetchMe().catch(() => null);
+      if (!role) return message.reply("❌ The Developer role was not found in this server.");
+      if (role.managed || role.id === message.guild.id || !botMember || role.position >= botMember.roles.highest.position) return message.reply("❌ LEADER cannot manage the Developer role. Move LEADER's highest role above Developer.");
+      if (target.id !== message.author.id && message.member.roles.highest.position <= target.roles.highest.position && message.guild.ownerId !== message.author.id) return message.reply("❌ You cannot manage a member whose highest role is equal to or higher than yours.");
+      try {
+        if (!target.roles.cache.has(role.id)) return message.reply(`ℹ️ ${target} does not have the Developer role.`);
+        await target.roles.remove(role, `Role shortcut ?undeveloper used by ${message.author.tag}`);
+        return message.reply(`✅ Removed **${role.name}** from ${target}.`);
+      } catch (err) {
+        console.error("?undeveloper role removal failed:", err);
+        return message.reply("❌ Could not remove the Developer role. Check LEADER's role hierarchy and permissions.");
       }
     }
 
