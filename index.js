@@ -22,8 +22,6 @@ const {
 } = require("discord.js");
 
 const config = require("./config");
-// Optional environment variable: Discord role ID to assign while members are in voice.
-const VC_ROLE_ID = String(process.env.VC_ROLE_ID || "").trim();
 
 const specialWelcome = require("./special-welcome");
 
@@ -352,6 +350,37 @@ function startHealthServer() {
       res.writeHead(405, { "Content-Type": "application/json; charset=utf-8", Allow: "GET, PUT, OPTIONS" });
       res.end(JSON.stringify({ ok: false, error: "Method not allowed" }));
       return;
+    }
+
+    if (pathname.startsWith("/api/progression-settings")) {
+      setApiHeaders(res);
+      if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+      const auth = String(req.headers.authorization || "");
+      const suppliedKey = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+      if (!isValidDashboardKey(suppliedKey)) {
+        res.writeHead(DASHBOARD_API_KEY ? 401 : 503, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: DASHBOARD_API_KEY ? "Unauthorized" : "Dashboard API is not configured." }));
+        return;
+      }
+      const sendProgressJson = (status, payload) => { res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); res.end(JSON.stringify(payload)); };
+      const guildId = String(new URL(req.url, "http://localhost").searchParams.get("guildId") || "").trim();
+      if (!/^\d{17,20}$/.test(guildId)) return sendProgressJson(400, { ok: false, error: "Choose a valid Discord server." });
+      if (!client.isReady()) return sendProgressJson(503, { ok: false, error: "Discord bot is not ready yet." });
+      const guild = await client.guilds.fetch(guildId).catch(() => null);
+      if (!guild) return sendProgressJson(404, { ok: false, error: "LEADER is not in that server." });
+      if (req.method === "GET") return sendProgressJson(200, { ok: true, settings: getProgressSettings(guildId) });
+      if (req.method !== "PUT") return sendProgressJson(405, { ok: false, error: "Method not allowed" });
+      try {
+        const body = await readJsonBody(req, 5000);
+        const channelId = String((body.settings || body).progressViewChannelId || "").trim();
+        if (channelId) {
+          if (!/^\d{17,20}$/.test(channelId)) return sendProgressJson(400, { ok: false, error: "Choose a valid text channel." });
+          const channel = await guild.channels.fetch(channelId).catch(() => null);
+          if (!channel || !channel.isTextBased()) return sendProgressJson(400, { ok: false, error: "That channel is not a text channel in this server." });
+        }
+        setProgressViewChannel(guildId, channelId);
+        return sendProgressJson(200, { ok: true, settings: getProgressSettings(guildId) });
+      } catch (err) { return sendProgressJson(400, { ok: false, error: "Could not save progression channel." }); }
     }
 
     // Shared dashboard configuration is stored by the bot process, not only in browser localStorage.
@@ -2075,6 +2104,69 @@ async function handleActivityCommand(message) {
   return message.reply(activityHelp());
 }
 
+
+// Keyword moderation: strikes reset after a rolling 24-hour window per member/server.
+const KEYWORD_STRIKES_FILE = path.join(__dirname, "keyword-moderation-strikes.json");
+let keywordStrikes = loadJson(KEYWORD_STRIKES_FILE, {});
+if (!keywordStrikes || typeof keywordStrikes !== "object" || Array.isArray(keywordStrikes)) keywordStrikes = {};
+const KEYWORD_TERMS = [
+"madarchod","maderchod","madarchodd","madarch0d","madarchood","madharchod",
+"bhenchod","behenchod","bhenchodd","behnchod","bhench0d","bhosdike","bhosdiwale","bhosadike","bhosdika","bhosdi",
+"chutiya","chutiye","chutiyapa","chutiyaa","gaand","gandu","ganduu","gandwe","gandmara","lund","lauda","laude","lodu","lode","lawde","lawda","lavde","lavda",
+"harami","haramkhor","kamina","kamine","kameena","saala","saali","randi","randwa","bakchod","bakchodi","gadha","kutte","kutta","kutti",
+"bsdk","bkl","mkc","mkl","gndu","gnd","fuck","fucking","motherfucker","bitch","bastard","asshole","dickhead","dumbass","jackass","bullshit","stfu","gtfo",
+"porn","hentai","nudes","blowjob","handjob","masturbation","orgasm","dildo",
+"rape kar dunga","rape karunga","teri maa ko chodunga","teri behen ko chodunga","nanga kar dunga","photo leak kar dunga","private photo leak","address leak kar dunga","jaan se maar dunga","maar daalunga"
+];
+function normalizeKeywordText(value) {
+  return String(value || "").normalize("NFKC").toLowerCase()
+    .replace(/[૦-૯]/g, c => String("૦૧૨૩૪૫૬૭૮૯".indexOf(c)))
+    .replace(/[@]/g, "a").replace(/[0]/g, "o").replace(/[1!|]/g, "i").replace(/[$]/g, "s")
+    .replace(/[*_.\-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+function containsBlockedKeyword(content) {
+  const normalized = normalizeKeywordText(content);
+  if (!normalized) return false;
+  return KEYWORD_TERMS.some(term => {
+    const t = normalizeKeywordText(term).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp("(^|[^a-z0-9])" + t.replace(/\s+/g, "\\s+") + "($|[^a-z0-9])", "i").test(normalized);
+  });
+}
+function saveKeywordStrikes() {
+  try { fs.writeFileSync(KEYWORD_STRIKES_FILE, JSON.stringify(keywordStrikes, null, 2)); }
+  catch (e) { console.error("Could not save keyword moderation strikes:", e.message); }
+}
+async function moderateBlockedKeyword(message) {
+  if (!message.guild || message.author.bot || !message.member || !containsBlockedKeyword(message.content)) return false;
+  if (message.member.permissions.has(PermissionFlagsBits.Administrator) || message.member.permissions.has(PermissionFlagsBits.ManageMessages)) return false;
+  const key = `${message.guild.id}:${message.author.id}`;
+  const now = Date.now();
+  let record = keywordStrikes[key];
+  if (!record || now - Number(record.startedAt || 0) >= 24 * 60 * 60 * 1000) record = { startedAt: now, count: 0 };
+  record.count = Math.min(4, Number(record.count || 0) + 1);
+  keywordStrikes[key] = record;
+  saveKeywordStrikes();
+  await message.delete().catch(() => {});
+  const durations = [0, 5 * 60, 60 * 60, 24 * 60 * 60];
+  let result;
+  if (record.count === 1) {
+    result = "⚠️ Please keep the chat respectful. This is your warning for using abusive or inappropriate language. Further violations within 24 hours will result in a timeout.";
+  } else {
+    const seconds = record.count === 2 ? 5 * 60 : record.count === 3 ? 60 * 60 : 24 * 60 * 60;
+    const member = message.member;
+    try {
+      await member.timeout(seconds * 1000, "Repeated abusive/inappropriate keyword use (within 24 hours)");
+      result = `⏱️ Your message was removed. This is strike ${record.count}/4; you have been timed out for ${seconds === 300 ? "5 minutes" : seconds === 3600 ? "1 hour" : "1 day"}. Strikes reset after 24 hours.`;
+    } catch (err) {
+      result = "⚠️ Your message was removed, but I couldn't apply the timeout. Please notify a moderator to check my Moderate Members permission and role position.";
+      console.error("Keyword moderation timeout failed:", err.message);
+    }
+  }
+  const notice = await message.channel.send({ content: `${message.author} ${result}`, allowedMentions: { users: [message.author.id] } }).catch(() => null);
+  if (notice) setTimeout(() => notice.delete().catch(() => {}), 10000);
+  return true;
+}
+
 /* =========================
    MESSAGE COMMANDS
 ========================= */
@@ -2097,6 +2189,8 @@ client.on(
       }
       return;
     }
+
+    if (await moderateBlockedKeyword(message)) return;
 
     const content = message.content.trim();
     const lowerContent = content.toLowerCase();
@@ -3541,24 +3635,6 @@ client.on(
 
       if (member?.user?.bot) {
         return;
-      }
-
-      // Auto VC role is configured only through the VC_ROLE_ID environment variable.
-      const configuredVcRoleId = VC_ROLE_ID;
-      if (configuredVcRoleId && member?.roles) {
-        try {
-          if (!oldState.channelId && newState.channelId) {
-            if (!member.roles.cache.has(configuredVcRoleId)) {
-              await member.roles.add(configuredVcRoleId, "Auto VC role: joined voice channel");
-            }
-          } else if (oldState.channelId && !newState.channelId) {
-            if (member.roles.cache.has(configuredVcRoleId)) {
-              await member.roles.remove(configuredVcRoleId, "Auto VC role: left voice channel");
-            }
-          }
-        } catch (roleErr) {
-          console.error("Auto VC role error:", roleErr.message);
-        }
       }
 
       const joined =
