@@ -4,7 +4,7 @@ This update replaces the old prototype-style dashboard with a mobile-responsive 
 
 ## Changed files
 
-- `LEADER-dashboard-v4-connected.html` — new responsive dashboard, animated navigation/cards, live connection status, settings forms and live previews.
+- `LEADER-dashboard-v4-connected.html` — new responsive dashboard, responsive animated navigation/cards, dark form controls across all input types, compact command rows, live connection status, settings forms and live previews. The connection panel collapses after a successful connection; use **Connection settings** to reopen it, and **Disconnect** clears the saved API key.
 - `index.js` — authenticated APIs for moderator alert settings and moderation log channels; adds the special-welcome and moderator-alert routes to the authenticated API router; enables CORS preflight for role deletion.
 - `special-welcome.js` — guild-specific enabled state and configurable join/banner message templates while preserving the existing `?setspecialwelcomechannel` command and banner renderer.
 
@@ -35,7 +35,7 @@ The special welcome templates support `{user}`, `{member}`, `{username}`, `{serv
 
 ## Important limitations and operational notes
 
-- Static syntax checks passed for `index.js`, `special-welcome.js`, and the dashboard JavaScript. This is not a live Discord/Render integration test; the bot must be deployed and tested against your server.
+- Static syntax checks passed for `index.js`, `special-welcome.js`, and the dashboard JavaScript. The latest UI repair also passed a JavaScript syntax check. This is not a live Discord/Render integration test; the bot must be deployed and tested against your server.
 - JSON settings such as `special-welcome-config.json`, `moderator-alerts.json`, `moderation-logs.json`, `autoroles.json`, and dashboard settings are stored on the service filesystem, consistent with the existing bot. Render free services generally have ephemeral filesystems; settings written locally may be lost when the service is replaced/redeployed. Use a persistent disk where supported or move these settings to durable storage before relying on them for production.
 - The dashboard uses a private shared API key for this local/private workflow. Do not publish the HTML with a real key embedded in it. A publicly hosted dashboard should use Discord OAuth and server-side sessions.
 - The website exposes implemented bot features only; it does not add giveaways, fake workflow builders, fake ticket controls, or a simulated historical log viewer.
