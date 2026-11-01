@@ -1033,16 +1033,20 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   let connection;
   let player;
   try {
+    // Prepare the player and audio resource while Discord establishes the voice
+    // connection, so decoder/resource setup does not add delay after the bot joins.
+    player = createAudioPlayer();
+    const resource = createAudioResource(audioPath);
+
     connection = joinVoiceChannel({
       channelId: channel.id,
       guildId: newState.guild.id,
       adapterCreator: newState.guild.voiceAdapterCreator,
       selfDeaf: true
     });
-    await entersState(connection, VoiceConnectionStatus.Ready, 15000);
-    player = createAudioPlayer();
     connection.subscribe(player);
-    const resource = createAudioResource(audioPath);
+    await entersState(connection, VoiceConnectionStatus.Ready, 15000);
+
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("Audio playback timed out")), 120000);
       player.once(AudioPlayerStatus.Idle, () => { clearTimeout(timeout); resolve(); });
