@@ -425,7 +425,7 @@ function startHealthServer() {
       if (pathname === "/api/vc-announcement") {
         const parsed = new URL(req.url, "http://localhost");
         const guildId = String(parsed.searchParams.get("guildId") || "").trim();
-        if (!/^\\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Choose a valid Discord server." });
+        if (!/^\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Choose a valid Discord server." });
         if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
         const guild = await client.guilds.fetch(guildId).catch(() => null);
         if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
@@ -869,10 +869,15 @@ function startHealthServer() {
     }
 
     if (pathname === "/health" || pathname === "/") {
-      // Health checks must be reachable from a dashboard opened as a local HTML file.
-      // Keep API availability separate from Discord Gateway readiness: Render can
-      // reach the HTTP backend even while the Discord client is still connecting.
+      // Health checks must be reachable from the dashboard's separate HTTPS origin.
+      // Keep API availability separate from Discord Gateway readiness.
       setApiHeaders(res);
+      if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        res.writeHead(405, { "Content-Type": "application/json; charset=utf-8", Allow: "GET, HEAD, OPTIONS" });
+        res.end(JSON.stringify({ ok: false, error: "Method not allowed" }));
+        return;
+      }
       const ready = client?.isReady?.() === true;
       res.writeHead(200, {
         "Content-Type": "application/json; charset=utf-8",
