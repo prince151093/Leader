@@ -21,6 +21,20 @@ const {
   AttachmentBuilder
 } = require("discord.js");
 
+const {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  VoiceConnectionStatus,
+  entersState
+} = require("@discordjs/voice");
+try {
+  const bundledFfmpeg = require("ffmpeg-static");
+  if (bundledFfmpeg) process.env.FFMPEG_PATH = process.env.FFMPEG_PATH || bundledFfmpeg;
+} catch (err) {
+  console.warn("[VC ANNOUNCEMENT] ffmpeg-static is unavailable; audio playback may require system FFmpeg.");
+}
 const config = require("./config");
 
 const specialWelcome = require("./special-welcome");
@@ -177,6 +191,19 @@ function formatCommandDenial(message, commandName, user) {
   return template.replace(/\{user\}/g, `<@${user.id}>`).replace(/\{username\}/g, user.username || "user").replace(/\{command\}/g, commandName.startsWith("?") || commandName.startsWith("/") ? commandName : `?${commandName}`);
 }
 const DASHBOARD_API_KEY = String(process.env.DASHBOARD_API_KEY || "");
+const VC_ANNOUNCEMENT_FILE = path.join(__dirname, "vc-announcement-config.json");
+const VC_ANNOUNCEMENT_AUDIO_DIR = path.join(__dirname, "assets", "vc-announcements");
+let vcAnnouncementConfig = loadJson(VC_ANNOUNCEMENT_FILE, {});
+const vcAnnouncementBusyGuilds = new Set();
+function getVcAnnouncementSettings(guildId) {
+  const saved = vcAnnouncementConfig[guildId] || {};
+  return { enabled: saved.enabled === true, roleIds: Array.isArray(saved.roleIds) ? saved.roleIds.filter(x => /^\d{17,20}$/.test(String(x))) : [], audioFile: saved.audioFile || "", audioName: saved.audioName || "" };
+}
+function saveVcAnnouncementSettings(guildId, settings) {
+  vcAnnouncementConfig[guildId] = settings;
+  saveJson(VC_ANNOUNCEMENT_FILE, vcAnnouncementConfig);
+}
+
 const DEFAULT_ANTI_SPAM_SETTINGS = Object.freeze({
   enabled: true,
   threshold: 3,
@@ -384,7 +411,7 @@ function startHealthServer() {
     }
 
     // Shared dashboard configuration is stored by the bot process, not only in browser localStorage.
-    if (["/api/dashboard-config", "/api/command-manager", "/api/command-manager/audit", "/api/command-manager/analytics", "/api/command-manager/rollback", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup", "/api/discord-roles", "/api/discord-role", "/api/auto-roles", "/api/role-command-aliases", "/api/special-welcome", "/api/mod-alerts", "/api/moderation-logs"].includes(pathname)) {
+    if (["/api/dashboard-config", "/api/command-manager", "/api/command-manager/audit", "/api/command-manager/analytics", "/api/command-manager/rollback", "/api/send-message", "/api/discord-servers", "/api/discord-server-lookup", "/api/discord-channels", "/api/discord-channel-lookup", "/api/discord-roles", "/api/discord-role", "/api/auto-roles", "/api/role-command-aliases", "/api/special-welcome", "/api/mod-alerts", "/api/moderation-logs", "/api/vc-announcement"].includes(pathname)) {
       setApiHeaders(res);
       if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
       const auth = String(req.headers.authorization || "");
@@ -395,6 +422,51 @@ function startHealthServer() {
         return;
       }
       const sendJson = (status, payload) => { res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); res.end(JSON.stringify(payload)); };
+      if (pathname === "/api/vc-announcement") {
+        const parsed = new URL(req.url, "http://localhost");
+        const guildId = String(parsed.searchParams.get("guildId") || "").trim();
+        if (!/^\\d{17,20}$/.test(guildId)) return sendJson(400, { ok: false, error: "Choose a valid Discord server." });
+        if (!client.isReady()) return sendJson(503, { ok: false, error: "Discord bot is not ready yet." });
+        const guild = await client.guilds.fetch(guildId).catch(() => null);
+        if (!guild) return sendJson(404, { ok: false, error: "LEADER is not in that server." });
+        if (req.method === "GET") return sendJson(200, { ok: true, settings: getVcAnnouncementSettings(guildId) });
+        if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
+        try {
+          const body = await readJsonBody(req, 14 * 1024 * 1024);
+          const incoming = body.settings && typeof body.settings === "object" ? body.settings : body;
+          const current = getVcAnnouncementSettings(guildId);
+          const roleIds = Array.isArray(incoming.roleIds) ? [...new Set(incoming.roleIds.map(String).filter(id => /^\d{17,20}$/.test(id)))].slice(0, 30) : current.roleIds;
+          for (const roleId of roleIds) {
+            const role = await guild.roles.fetch(roleId).catch(() => null);
+            if (!role || role.id === guild.id || role.managed) return sendJson(400, { ok: false, error: "One or more selected roles are invalid or managed." });
+          }
+          let audioFile = current.audioFile, audioName = current.audioName;
+          if (incoming.removeAudio === true) {
+            if (audioFile) fs.promises.unlink(path.join(VC_ANNOUNCEMENT_AUDIO_DIR, path.basename(audioFile))).catch(() => {});
+            audioFile = ""; audioName = "";
+          }
+          if (incoming.audioData) {
+            const name = String(incoming.audioName || "announcement.mp3").slice(0, 120);
+            const ext = path.extname(name).toLowerCase();
+            if (![".mp3", ".wav", ".ogg"].includes(ext)) return sendJson(400, { ok: false, error: "Upload an MP3, WAV or OGG audio file." });
+            const encoded = String(incoming.audioData).replace(/^data:[^;]+;base64,/, "");
+            if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) return sendJson(400, { ok: false, error: "Invalid audio file data." });
+            const buffer = Buffer.from(encoded, "base64");
+            if (!buffer.length || buffer.length > 10 * 1024 * 1024) return sendJson(413, { ok: false, error: "Audio file must be between 1 byte and 10 MB." });
+            await fs.promises.mkdir(VC_ANNOUNCEMENT_AUDIO_DIR, { recursive: true });
+            const filename = `${guildId}-${Date.now()}${ext}`;
+            await fs.promises.writeFile(path.join(VC_ANNOUNCEMENT_AUDIO_DIR, filename), buffer);
+            if (audioFile && audioFile !== filename) fs.promises.unlink(path.join(VC_ANNOUNCEMENT_AUDIO_DIR, path.basename(audioFile))).catch(() => {});
+            audioFile = filename; audioName = name;
+          }
+          const settings = { enabled: incoming.enabled === true, roleIds, audioFile, audioName };
+          saveVcAnnouncementSettings(guildId, settings);
+          return sendJson(200, { ok: true, settings });
+        } catch (err) {
+          console.error("[VC ANNOUNCEMENT] Dashboard save failed:", err?.message || err);
+          return sendJson(err.statusCode || 400, { ok: false, error: err.statusCode === 413 ? "Audio upload is too large." : "Could not save VC announcement settings." });
+        }
+      }
       if (pathname === "/api/moderation-logs") {
         const parsed = new URL(req.url, "http://localhost");
         const guildId = String(parsed.searchParams.get("guildId") || "").trim();
@@ -928,6 +1000,57 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     }
   } catch (err) {
     console.error("[VC ROLE] Failed to update voice role:", err?.message || err);
+  }
+});
+
+/* =========================
+   DASHBOARD VC ANNOUNCEMENT
+========================= */
+client.on("voiceStateUpdate", async (oldState, newState) => {
+  const member = newState.member;
+  if (!member || member.user?.bot || oldState.channelId || !newState.channelId) return;
+  const settings = getVcAnnouncementSettings(newState.guild.id);
+  if (!settings.enabled || !settings.roleIds.some(id => member.roles.cache.has(id)) || !settings.audioFile) return;
+  if (vcAnnouncementBusyGuilds.has(newState.guild.id)) return;
+  const audioPath = path.join(VC_ANNOUNCEMENT_AUDIO_DIR, path.basename(settings.audioFile));
+  if (!fs.existsSync(audioPath)) {
+    console.warn(`[VC ANNOUNCEMENT] Audio file missing for guild ${newState.guild.id}.`);
+    return;
+  }
+  const channel = newState.channel;
+  if (!channel || channel.type !== ChannelType.GuildVoice || channel.joinable === false) return;
+  const botMember = newState.guild.members.me || await newState.guild.members.fetchMe().catch(() => null);
+  if (!botMember || !channel.permissionsFor(botMember)?.has([PermissionFlagsBits.Connect, PermissionFlagsBits.Speak])) {
+    console.warn(`[VC ANNOUNCEMENT] Missing Connect/Speak permission in channel ${channel.id}.`);
+    return;
+  }
+  vcAnnouncementBusyGuilds.add(newState.guild.id);
+  let connection;
+  let player;
+  try {
+    connection = joinVoiceChannel({
+      channelId: channel.id,
+      guildId: newState.guild.id,
+      adapterCreator: newState.guild.voiceAdapterCreator,
+      selfDeaf: true
+    });
+    await entersState(connection, VoiceConnectionStatus.Ready, 15000);
+    player = createAudioPlayer();
+    connection.subscribe(player);
+    const resource = createAudioResource(audioPath);
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Audio playback timed out")), 120000);
+      player.once(AudioPlayerStatus.Idle, () => { clearTimeout(timeout); resolve(); });
+      player.once("error", error => { clearTimeout(timeout); reject(error); });
+      player.play(resource);
+    });
+    console.log(`[VC ANNOUNCEMENT] Played announcement in ${channel.id} for ${member.id}.`);
+  } catch (err) {
+    console.error("[VC ANNOUNCEMENT] Playback failed:", err?.message || err);
+  } finally {
+    try { player?.stop(true); } catch {}
+    try { connection?.destroy(); } catch {}
+    vcAnnouncementBusyGuilds.delete(newState.guild.id);
   }
 });
 
