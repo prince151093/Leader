@@ -198,12 +198,14 @@ const vcAnnouncementBusyGuilds = new Set();
 function getVcAnnouncementSettings(guildId) {
   const saved = vcAnnouncementConfig[guildId] || {};
   const roleIds = Array.isArray(saved.roleIds) ? saved.roleIds.filter(x => /^\\d{17,20}$/.test(String(x))) : [];
-  const roleAudio = saved.roleAudio && typeof saved.roleAudio === "object" && !Array.isArray(saved.roleAudio) ? { ...saved.roleAudio } : {};
-  // Migrate the legacy single-audio setting to the first selected role.
-  if (saved.audioFile && roleIds.length && !roleAudio[roleIds[0]]) {
-    roleAudio[roleIds[0]] = { audioFile: saved.audioFile, audioName: saved.audioName || "" };
+  const roleAudios = saved.roleAudios && typeof saved.roleAudios === "object" ? { ...saved.roleAudios } : {};
+  // Backward compatibility: copy the old shared audio mapping to selected roles.
+  if (saved.audioFile && roleIds.length) {
+    for (const roleId of roleIds) {
+      if (!roleAudios[roleId]) roleAudios[roleId] = { audioFile: saved.audioFile, audioName: saved.audioName || "Announcement audio" };
+    }
   }
-  return { enabled: saved.enabled === true, roleIds, roleAudio };
+  return { enabled: saved.enabled === true, roleIds, roleAudios };
 }
 function saveVcAnnouncementSettings(guildId, settings) {
   vcAnnouncementConfig[guildId] = settings;
@@ -438,7 +440,7 @@ function startHealthServer() {
         if (req.method === "GET") return sendJson(200, { ok: true, settings: getVcAnnouncementSettings(guildId) });
         if (req.method !== "PUT") return sendJson(405, { ok: false, error: "Method not allowed" });
         try {
-          const body = await readJsonBody(req, 14 * 1024 * 1024);
+          const body = await readJsonBody(req, 40 * 1024 * 1024);
           const incoming = body.settings && typeof body.settings === "object" ? body.settings : body;
           const current = getVcAnnouncementSettings(guildId);
           const roleIds = Array.isArray(incoming.roleIds) ? [...new Set(incoming.roleIds.map(String).filter(id => /^\d{17,20}$/.test(id)))].slice(0, 30) : current.roleIds;
@@ -446,34 +448,31 @@ function startHealthServer() {
             const role = await guild.roles.fetch(roleId).catch(() => null);
             if (!role || role.id === guild.id || role.managed) return sendJson(400, { ok: false, error: "One or more selected roles are invalid or managed." });
           }
-          const roleAudio = { ...(current.roleAudio || {}) };
-          const upload = incoming.roleAudioUpload && typeof incoming.roleAudioUpload === "object" ? incoming.roleAudioUpload : null;
-          if (upload) {
-            const roleId = String(upload.roleId || "");
-            if (!/^\\d{17,20}$/.test(roleId)) return sendJson(400, { ok: false, error: "Choose a valid role for this audio." });
-            const targetRole = await guild.roles.fetch(roleId).catch(() => null);
-            if (!targetRole || targetRole.id === guild.id || targetRole.managed) return sendJson(400, { ok: false, error: "The audio role is invalid or managed." });
-            if (upload.remove !== true && !roleIds.includes(roleId)) return sendJson(400, { ok: false, error: "Select this role before adding its announcement audio." });
-            const oldAudio = roleAudio[roleId]?.audioFile;
-            if (upload.remove === true) {
-              if (oldAudio) fs.promises.unlink(path.join(VC_ANNOUNCEMENT_AUDIO_DIR, path.basename(oldAudio))).catch(() => {});
-              delete roleAudio[roleId];
-            } else if (upload.audioData) {
-              const name = String(upload.audioName || "announcement.mp3").slice(0, 120);
-              const ext = path.extname(name).toLowerCase();
-              if (![".mp3", ".wav", ".ogg"].includes(ext)) return sendJson(400, { ok: false, error: "Upload an MP3, WAV or OGG audio file." });
-              const encoded = String(upload.audioData).replace(/^data:[^;]+;base64,/, "");
-              if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) return sendJson(400, { ok: false, error: "Invalid audio file data." });
-              const buffer = Buffer.from(encoded, "base64");
-              if (!buffer.length || buffer.length > 10 * 1024 * 1024) return sendJson(413, { ok: false, error: "Audio file must be between 1 byte and 10 MB." });
-              await fs.promises.mkdir(VC_ANNOUNCEMENT_AUDIO_DIR, { recursive: true });
-              const filename = `${guildId}-${roleId}-${Date.now()}${ext}`;
-              await fs.promises.writeFile(path.join(VC_ANNOUNCEMENT_AUDIO_DIR, filename), buffer);
-              if (oldAudio && oldAudio !== filename) fs.promises.unlink(path.join(VC_ANNOUNCEMENT_AUDIO_DIR, path.basename(oldAudio))).catch(() => {});
-              roleAudio[roleId] = { audioFile: filename, audioName: name };
+          const roleAudios = { ...(current.roleAudios || {}) };
+          if (incoming.roleAudios && typeof incoming.roleAudios === "object") {
+            for (const [roleId, audioInput] of Object.entries(incoming.roleAudios)) {
+              if (!roleIds.includes(roleId)) continue;
+              const audio = audioInput && typeof audioInput === "object" ? audioInput : {};
+              if (audio.removeAudio === true) {
+                delete roleAudios[roleId];
+                continue;
+              }
+              if (audio.audioData) {
+                const name = String(audio.audioName || "announcement.mp3").slice(0, 120);
+                const ext = path.extname(name).toLowerCase();
+                if (![".mp3", ".wav", ".ogg"].includes(ext)) return sendJson(400, { ok: false, error: `Invalid audio format for role ${roleId}. Use MP3, WAV or OGG.` });
+                const encoded = String(audio.audioData).replace(/^data:[^;]+;base64,/, "");
+                if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) return sendJson(400, { ok: false, error: "Invalid audio file data." });
+                const buffer = Buffer.from(encoded, "base64");
+                if (!buffer.length || buffer.length > 10 * 1024 * 1024) return sendJson(413, { ok: false, error: "Each audio file must be between 1 byte and 10 MB." });
+                await fs.promises.mkdir(VC_ANNOUNCEMENT_AUDIO_DIR, { recursive: true });
+                const filename = `${guildId}-${roleId}-${Date.now()}${ext}`;
+                await fs.promises.writeFile(path.join(VC_ANNOUNCEMENT_AUDIO_DIR, filename), buffer);
+                roleAudios[roleId] = { audioFile: filename, audioName: name };
+              }
             }
           }
-          const settings = { enabled: incoming.enabled === true, roleIds, roleAudio };
+          const settings = { enabled: incoming.enabled === true, roleIds, roleAudios };
           saveVcAnnouncementSettings(guildId, settings);
           return sendJson(200, { ok: true, settings });
         } catch (err) {
@@ -1027,36 +1026,23 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 ========================= */
 client.on("voiceStateUpdate", async (oldState, newState) => {
   const member = newState.member;
-  const movedIntoChannel = Boolean(newState.channelId) &&
-    (!oldState.channelId || oldState.channelId !== newState.channelId);
-  if (!member || member.user?.bot || !movedIntoChannel || !newState.guild) return;
-
+  if (!member || member.user?.bot || !newState.channelId || oldState.channelId === newState.channelId) return;
   const settings = getVcAnnouncementSettings(newState.guild.id);
-  if (!settings.enabled || !settings.roleIds.length) return;
-
-  // When multiple configured roles match, the highest role wins.
-  const matchingRole = settings.roleIds
-    .map(id => member.roles.cache.get(id))
+  if (!settings.enabled) return;
+  const matchedRoles = settings.roleIds
+    .filter(id => member.roles.cache.has(id) && settings.roleAudios?.[id]?.audioFile)
+    .map(id => newState.guild.roles.cache.get(id))
     .filter(Boolean)
-    .sort((a, b) => b.position - a.position)[0];
-  if (!matchingRole) return;
-
-  const roleAudio = settings.roleAudio?.[matchingRole.id];
-  if (!roleAudio?.audioFile) {
-    console.warn(`[VC ANNOUNCEMENT] No audio configured for matching role ${matchingRole.id} in guild ${newState.guild.id}.`);
-    return;
-  }
-  if (vcAnnouncementBusyGuilds.has(newState.guild.id)) {
-    console.log(`[VC ANNOUNCEMENT] Skipped ${member.id}; another announcement is already playing in guild ${newState.guild.id}.`);
-    return;
-  }
-
+    .sort((a, b) => b.position - a.position);
+  const selectedRole = matchedRoles[0];
+  const roleAudio = selectedRole ? settings.roleAudios[selectedRole.id] : null;
+  if (!selectedRole || !roleAudio?.audioFile) return;
+  if (vcAnnouncementBusyGuilds.has(newState.guild.id)) return;
   const audioPath = path.join(VC_ANNOUNCEMENT_AUDIO_DIR, path.basename(roleAudio.audioFile));
   if (!fs.existsSync(audioPath)) {
-    console.warn(`[VC ANNOUNCEMENT] Audio file missing for role ${matchingRole.id} in guild ${newState.guild.id}.`);
+    console.warn(`[VC ANNOUNCEMENT] Audio file missing for guild ${newState.guild.id}.`);
     return;
   }
-
   const channel = newState.channel;
   if (!channel || channel.type !== ChannelType.GuildVoice || channel.joinable === false) return;
   const botMember = newState.guild.members.me || await newState.guild.members.fetchMe().catch(() => null);
@@ -1064,13 +1050,15 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     console.warn(`[VC ANNOUNCEMENT] Missing Connect/Speak permission in channel ${channel.id}.`);
     return;
   }
-
   vcAnnouncementBusyGuilds.add(newState.guild.id);
   let connection;
   let player;
   try {
+    // Prepare the player and audio resource while Discord establishes the voice
+    // connection, so decoder/resource setup does not add delay after the bot joins.
     player = createAudioPlayer();
     const resource = createAudioResource(audioPath);
+
     connection = joinVoiceChannel({
       channelId: channel.id,
       guildId: newState.guild.id,
@@ -1086,7 +1074,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       player.once("error", error => { clearTimeout(timeout); reject(error); });
       player.play(resource);
     });
-    console.log(`[VC ANNOUNCEMENT] Played ${matchingRole.name} announcement in ${channel.id} for ${member.id}.`);
+    console.log(`[VC ANNOUNCEMENT] Played announcement in ${channel.id} for ${member.id}.`);
   } catch (err) {
     console.error("[VC ANNOUNCEMENT] Playback failed:", err?.message || err);
   } finally {
