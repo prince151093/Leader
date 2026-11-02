@@ -197,7 +197,7 @@ let vcAnnouncementConfig = loadJson(VC_ANNOUNCEMENT_FILE, {});
 const vcAnnouncementBusyGuilds = new Set();
 function getVcAnnouncementSettings(guildId) {
   const saved = vcAnnouncementConfig[guildId] || {};
-  const roleIds = Array.isArray(saved.roleIds) ? saved.roleIds.filter(x => /^\\d{17,20}$/.test(String(x))) : [];
+  const roleIds = Array.isArray(saved.roleIds) ? saved.roleIds.filter(x => /^\d{17,20}$/.test(String(x))) : [];
   const roleAudios = saved.roleAudios && typeof saved.roleAudios === "object" ? { ...saved.roleAudios } : {};
   // Backward compatibility: copy the old shared audio mapping to selected roles.
   if (saved.audioFile && roleIds.length) {
