@@ -5,11 +5,12 @@ Open the connected Leader dashboard and select **VC Announcements**.
 
 - Enable or disable the feature.
 - Select one or more server roles (the `@everyone` role is excluded).
-- Upload or replace an MP3, WAV, or OGG announcement (up to 10 MB).
-- Preview the selected local audio before saving.
-- Remove the saved audio if required.
+- Upload, preview, replace, or remove a separate MP3, WAV, or OGG announcement for each selected role (up to 10 MB per file).
+- Save each role's audio independently; changing one role's audio does not affect another role.
+- Save the feature toggle and selected roles with **Save settings**.
+- If a member has multiple selected roles, the highest-position matching role's audio is used.
 
-When a non-bot member joins a voice channel from outside voice and has at least one selected role, Leader joins that voice channel, plays the saved audio, and disconnects. Channel-to-channel moves and role changes do not trigger playback. Only one announcement plays at a time per server.
+When a non-bot member joins a voice channel or moves directly from one voice channel to another, Leader joins the destination channel, plays the audio assigned to the member's highest-position selected role, and disconnects. Leaving voice does not trigger playback. Only one announcement plays at a time per server; another trigger received during playback is skipped.
 
 ## Deployment requirements
 - Install dependencies from the updated `package.json` during deployment.
