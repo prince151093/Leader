@@ -4,6 +4,7 @@ const { AttachmentBuilder, PermissionFlagsBits } = require('discord.js');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 
 const CONFIG_FILE = path.join(__dirname, 'special-welcome-config.json');
+const { persistJsonFile, flushPersistentJson } = require('./persistent-json');
 const TEMPLATE_FILE = path.join(__dirname, 'assets', 'special-welcome-template.png');
 
 // The uploaded VR template is 1354x698. These boxes intentionally stay inside
@@ -34,6 +35,7 @@ function loadConfig() {
 
 function saveConfig(config) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  persistJsonFile(CONFIG_FILE, config);
 }
 
 function getConfig(guildId) {
@@ -265,7 +267,13 @@ async function handleMessage(message) {
       return true;
     }
     setChannelId(message.guild.id, message.channel.id);
-    await message.reply(`✅ Special welcome channel set to ${message.channel}.`);
+    try {
+      await flushPersistentJson();
+      await message.reply(`✅ Special welcome channel set to ${message.channel}.`);
+    } catch (error) {
+      console.error('Special welcome settings save failed:', error.message);
+      await message.reply('❌ I could not save this setting to persistent storage. Please try again.');
+    }
     return true;
   }
 

@@ -1,0 +1,15 @@
+CHANGED-FILES.txt
+
+LEADER-dashboard-v4-connected.html
+LEADER-index.js
+PERSISTENT-SETTINGS-SETUP.md
+README.md
+bootstrap.js
+bot.js
+index.js
+package.json
+persistent-json.js
+progression.js
+special-welcome.js
+src/commands/giveaway.js
+supabase-settings-setup.sql

@@ -9,6 +9,7 @@ try {
 }
 
 const DATA_FILE = path.join(__dirname, "progression-data.json");
+const { persistJsonFile } = require("./persistent-json");
 const TIME_ZONE = process.env.PROGRESSION_TIMEZONE || "Asia/Kolkata";
 
 let data = {};
@@ -33,8 +34,10 @@ function saveProgressionNow() {
     const tmp = `${DATA_FILE}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
     fs.renameSync(tmp, DATA_FILE);
+    return persistJsonFile(DATA_FILE, data);
   } catch (err) {
     console.error("Progression data save error:", err);
+    return Promise.reject(err);
   }
 }
 
@@ -49,7 +52,7 @@ function saveProgression() {
     saveTimer = null;
     saveInProgress = true;
     try {
-      saveProgressionNow();
+      saveProgressionNow().catch(err => console.error("Progression persistence failed:", err.message));
     } finally {
       saveInProgress = false;
       if (saveAgain) {
@@ -66,7 +69,7 @@ function flushProgression() {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
-  saveProgressionNow();
+  return saveProgressionNow();
 }
 
 function ensureGuild(guildId) {
@@ -227,19 +230,19 @@ function getSettings(guildId) {
 function setDailyReportRole(guildId, roleId) {
   const settings = getSettings(guildId);
   settings.dailyReportRoleId = roleId;
-  saveProgression();
+  return saveProgressionNow();
 }
 
 function setProgressViewChannel(guildId, channelId) {
   const settings = getSettings(guildId);
   settings.progressViewChannelId = channelId;
-  saveProgression();
+  return saveProgressionNow();
 }
 
 function setTopGaragesChannel(guildId, channelId) {
   const settings = getSettings(guildId);
   settings.topGaragesChannelId = channelId;
-  saveProgression();
+  return saveProgressionNow();
 }
 
 function getProgressSettings(guildId) {
